@@ -1,0 +1,557 @@
+:root {
+  --background: #eff3ea;
+  --foreground: #1f2b22;
+  --panel: rgba(250, 252, 246, 0.86);
+  --border: rgba(38, 58, 41, 0.12);
+  --primary: #3d6b2f;
+  --primary-strong: #274e1b;
+  --good: #237748;
+  --warn: #b66b1c;
+  --shadow: 0 18px 50px rgba(24, 42, 20, 0.08);
+}
+
+html {
+  height: 100%;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  color: var(--foreground);
+  background:
+    radial-gradient(circle at top left, rgba(152, 188, 121, 0.22), transparent 32%),
+    radial-gradient(circle at top right, rgba(213, 229, 167, 0.65), transparent 28%),
+    linear-gradient(180deg, #f7f9f1 0%, var(--background) 48%, #e8efe0 100%);
+  font-family:
+    "Avenir Next",
+    "Segoe UI",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Noto Sans SC",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.appPage {
+  width: min(1440px, calc(100vw - 48px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.appHeader,
+.loginPage {
+  display: grid;
+  gap: 24px;
+}
+
+.appHeader {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.headerLead {
+  display: grid;
+  gap: 6px;
+}
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  color: rgba(31, 43, 34, 0.74);
+  font-size: 0.95rem;
+}
+
+.backLink:hover {
+  color: var(--primary-strong);
+}
+
+.eyebrow {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(31, 43, 34, 0.58);
+}
+
+.muted {
+  color: rgba(31, 43, 34, 0.64);
+}
+
+.loginPage {
+  width: min(1120px, calc(100vw - 48px));
+  margin: 0 auto;
+  min-height: 100vh;
+  align-items: center;
+  grid-template-columns: 1.1fr 0.9fr;
+}
+
+.loginShowcase {
+  padding: 36px;
+}
+
+.loginShowcase h2 {
+  font-size: clamp(2.8rem, 8vw, 5rem);
+  line-height: 0.92;
+  margin: 14px 0 16px;
+}
+
+.loginShowcase p {
+  max-width: 32rem;
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: rgba(31, 43, 34, 0.72);
+}
+
+.loginCard,
+.panel,
+.heroPanel,
+.deviceRail,
+.footerNotice {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.loginCard {
+  border-radius: 28px;
+  padding: 30px;
+  display: grid;
+  gap: 18px;
+}
+
+.loginCard h1 {
+  font-size: 2rem;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  font-size: 0.92rem;
+  color: rgba(31, 43, 34, 0.7);
+}
+
+.field input,
+.field select {
+  width: 100%;
+  border: 1px solid rgba(42, 66, 39, 0.14);
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 16px;
+  padding: 14px 16px;
+  outline: none;
+}
+
+.primaryButton,
+.ghostButton {
+  border: none;
+  border-radius: 999px;
+  padding: 13px 20px;
+  cursor: pointer;
+  transition: transform 160ms ease, opacity 160ms ease, background 160ms ease;
+}
+
+.primaryButton:hover,
+.ghostButton:hover {
+  transform: translateY(-1px);
+}
+
+.primaryButton:disabled,
+.ghostButton:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.primaryButton {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-strong) 100%);
+  color: white;
+}
+
+.ghostButton {
+  background: rgba(54, 84, 44, 0.08);
+  color: var(--foreground);
+}
+
+.credentialsCard,
+.subtleBlock {
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: rgba(214, 232, 175, 0.28);
+  border: 1px solid rgba(96, 130, 72, 0.14);
+}
+
+.consoleLayout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 20px;
+}
+
+.devicesPageHeader {
+  margin-bottom: 20px;
+}
+
+.devicesPageHeader h1 {
+  font-size: clamp(2rem, 4vw, 3.1rem);
+  margin: 10px 0 12px;
+}
+
+.wsBanner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0 18px;
+}
+
+.devicesGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.debugPanel {
+  margin-top: 20px;
+  background: rgba(20, 26, 22, 0.9);
+  color: #dce8d7;
+  border: 1px solid rgba(192, 221, 188, 0.12);
+  border-radius: 20px;
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+
+.debugList {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.debugEntry {
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.debugEntry.error {
+  border-color: rgba(255, 138, 138, 0.22);
+  background: rgba(120, 24, 24, 0.2);
+}
+
+.debugHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.86rem;
+  margin-bottom: 6px;
+}
+
+.debugEntry p {
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.debugEntry pre {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: #c1d4bb;
+}
+
+.deviceListCard {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+  border-radius: 24px;
+  padding: 22px;
+  display: grid;
+  gap: 16px;
+}
+
+.deviceListCardHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: start;
+}
+
+.deviceListCard h2 {
+  margin-top: 8px;
+  font-size: 1.35rem;
+}
+
+.deviceRail {
+  border-radius: 24px;
+  padding: 18px;
+  align-self: start;
+  position: sticky;
+  top: 20px;
+}
+
+.deviceRailList {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.deviceRailCard {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid transparent;
+}
+
+.deviceRailCard.active {
+  border-color: rgba(62, 107, 47, 0.3);
+  background: rgba(214, 232, 175, 0.38);
+}
+
+.deviceRailCard p {
+  margin-top: 4px;
+  color: rgba(31, 43, 34, 0.62);
+}
+
+.deviceMain {
+  display: grid;
+  gap: 20px;
+}
+
+.heroPanel {
+  border-radius: 28px;
+  padding: 24px;
+  display: grid;
+  gap: 22px;
+}
+
+.heroPanel h1 {
+  font-size: clamp(2rem, 5vw, 3.6rem);
+  margin: 8px 0;
+}
+
+.heroMetrics,
+.metricsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metricCard {
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(40, 60, 35, 0.08);
+  display: grid;
+  gap: 8px;
+}
+
+.metricCard span {
+  font-size: 0.82rem;
+  color: rgba(31, 43, 34, 0.66);
+}
+
+.metricCard strong {
+  font-size: 1.45rem;
+}
+
+.metricCard.good {
+  background: rgba(191, 230, 198, 0.35);
+}
+
+.metricCard.warn {
+  background: rgba(240, 215, 182, 0.38);
+}
+
+.contentGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.panel {
+  border-radius: 26px;
+  padding: 22px;
+  display: grid;
+  gap: 18px;
+}
+
+.panelWide {
+  grid-column: 1 / -1;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.panelTitle {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.actionRow,
+.fieldGrid,
+.infoList,
+.siteTable {
+  display: grid;
+  gap: 12px;
+}
+
+.actionRow {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.fieldGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.infoList {
+  margin-top: 4px;
+}
+
+.infoRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(31, 43, 34, 0.08);
+}
+
+.infoRow:last-child {
+  border-bottom: none;
+}
+
+.siteRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(31, 43, 34, 0.08);
+}
+
+.siteRow:last-child {
+  border-bottom: none;
+}
+
+.siteRow p {
+  margin-top: 4px;
+  color: rgba(31, 43, 34, 0.62);
+}
+
+.siteMeta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.statusPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 86px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  background: rgba(31, 43, 34, 0.08);
+}
+
+.statusPill.connected {
+  background: rgba(35, 119, 72, 0.18);
+  color: var(--good);
+}
+
+.statusPill.connecting {
+  background: rgba(208, 177, 111, 0.22);
+  color: var(--warn);
+}
+
+.statusPill.disconnected,
+.statusPill.error {
+  background: rgba(182, 107, 28, 0.16);
+  color: var(--warn);
+}
+
+.errorMessage,
+.errorBanner {
+  color: #8d3911;
+  background: rgba(246, 207, 186, 0.52);
+  border: 1px solid rgba(179, 101, 47, 0.22);
+  padding: 12px 14px;
+  border-radius: 16px;
+}
+
+.footerNotice {
+  border-radius: 22px;
+  padding: 16px 20px;
+}
+
+@media (max-width: 1024px) {
+  .loginPage,
+  .consoleLayout,
+  .contentGrid,
+  .devicesGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .deviceRail {
+    position: static;
+  }
+
+  .heroMetrics,
+  .metricsGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .appPage,
+  .loginPage {
+    width: min(100vw, calc(100vw - 24px));
+  }
+
+  .actionRow,
+  .fieldGrid,
+  .heroMetrics,
+  .metricsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .siteRow,
+  .appHeader {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}
