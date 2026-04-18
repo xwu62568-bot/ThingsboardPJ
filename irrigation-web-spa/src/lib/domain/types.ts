@@ -56,6 +56,8 @@ export type DeviceState = {
   sites: SiteState[];
 };
 
+export type GatewayState = "online" | "offline" | "unknown";
+
 export type DeviceSummary = Pick<
   DeviceState,
   | "id"
@@ -69,4 +71,10 @@ export type DeviceSummary = Pick<
   | "selectedSiteNumber"
   | "siteCount"
   | "batteryLevel"
->;
+> & {
+  isGateway?: boolean;
+  gatewayState?: GatewayState;
+  gatewayHeartbeatAt?: number;
+  bleConnectivityState?: ConnectivityState;
+  statusChangedAt?: number;
+};

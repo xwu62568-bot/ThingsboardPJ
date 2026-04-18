@@ -151,7 +151,11 @@ export class BleStore {
     sessions: Record<string, BleSession>,
     preferredDeviceId?: string,
   ): string | undefined {
-    if (preferredDeviceId && sessions[preferredDeviceId]) {
+    if (
+      preferredDeviceId &&
+      sessions[preferredDeviceId] &&
+      ['connected', 'connecting', 'reconnecting'].includes(sessions[preferredDeviceId].connectionState)
+    ) {
       return preferredDeviceId;
     }
 
@@ -175,6 +179,13 @@ export class BleStore {
     connectedDeviceId?: string;
     lastError?: { code: BleErrorCode; message: string };
   } {
+    if (scanning) {
+      return {
+        connectionState: 'scanning',
+        connectedDeviceId: activeDeviceId,
+      };
+    }
+
     const activeSession = activeDeviceId ? sessions[activeDeviceId] : undefined;
     if (activeSession) {
       if (activeSession.connectionState === 'connected') {
@@ -197,13 +208,6 @@ export class BleStore {
         connectionState: 'connected',
         connectedDeviceId: connected.deviceId,
         lastError: connected.lastError,
-      };
-    }
-
-    if (scanning) {
-      return {
-        connectionState: 'scanning',
-        connectedDeviceId: activeDeviceId,
       };
     }
 

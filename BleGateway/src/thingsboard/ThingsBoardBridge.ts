@@ -119,6 +119,7 @@ export class ThingsBoardBridge {
     this.disposed = false;
     console.log('[TB-BRIDGE] start');
     this.connectionUnsubscribe = this.client.onConnected((payload) => {
+      this.publishHeartbeat().catch((error) => this.client.setError(error));
       if (!payload.reconnect) {
         return;
       }
@@ -154,10 +155,25 @@ export class ThingsBoardBridge {
     this.rpcAbort?.abort();
     this.rpcAbort = undefined;
     this.clearPendingBleConnect();
-    for (const deviceName of this.connectedChildDevices.values()) {
-      this.client.disconnectChildDevice(deviceName).catch(() => undefined);
+    const pendingDisconnectPublishes: Array<Promise<void>> = [this.publishGatewayOffline()];
+    for (const [deviceId, deviceName] of this.connectedChildDevices.entries()) {
+      const now = Date.now();
+      pendingDisconnectPublishes.push(
+        this.client.publishChildAttributes(deviceName, {
+          bleConnectionState: 'disconnected',
+          bleConnected: false,
+          connectionStateText: this.getConnectionStateText('disconnected'),
+          connectedDeviceId: '',
+          connectedDeviceName: '',
+          blePeripheralId: deviceId,
+          lastConnectionUpdateTs: now,
+        }),
+      );
+      pendingDisconnectPublishes.push(this.client.disconnectChildDevice(deviceName));
     }
-    this.client.disconnect().catch(() => undefined);
+    this.connectedChildDevices.clear();
+    Promise.allSettled(pendingDisconnectPublishes)
+      .finally(() => this.client.disconnect().catch(() => undefined));
     this.bleUnsubscribe?.();
     this.bleUnsubscribe = undefined;
     this.attributesUnsubscribe?.();
@@ -184,6 +200,16 @@ export class ThingsBoardBridge {
     return this.refreshCloudState();
   }
 
+  async resumeAfterForeground(): Promise<void> {
+    if (!this.client.isConfigured()) {
+      return;
+    }
+    await this.client.connect();
+    await this.reconnectActiveChildDevices(this.bleStore.getState());
+    await this.publishBleState(this.bleStore.getState());
+    await this.refreshCloudState();
+  }
+
   private startHeartbeat(): void {
     if (this.heartbeatTimer) {
       return;
@@ -202,9 +228,11 @@ export class ThingsBoardBridge {
     try {
       const state = this.bleStore.getState();
       const now = Date.now();
-      const connectedSessions = Object.values(state.sessions).filter(
-        (session) => session.connectionState === 'connected' && session.deviceName?.trim(),
-      );
+      const sessions = Object.values(state.sessions).filter((session) => session.deviceName?.trim());
+      const connectedSessions = sessions.filter((session) => session.connectionState === 'connected');
+      const activeSession = state.connectedDeviceId ? state.sessions[state.connectedDeviceId] : undefined;
+      const activeConnectedSession =
+        activeSession?.connectionState === 'connected' ? activeSession : connectedSessions[0];
       console.log('[TB-BRIDGE] heartbeat', {
         connectionState: state.connectionState,
         connectedDeviceId: state.connectedDeviceId,
@@ -215,31 +243,38 @@ export class ThingsBoardBridge {
         ts: now,
         values: {
           gatewayHeartbeatTs: now,
+          gatewayOnline: true,
           bleConnectionState: state.connectionState,
-          bleConnected: connectedSessions.length > 0 || state.connectionState === 'connected',
-          connectedDeviceId: state.connectedDeviceId ?? '',
+          bleConnected: connectedSessions.length > 0,
+          connectedDeviceId: activeConnectedSession?.deviceId ?? '',
           connectedChildCount: connectedSessions.length,
         },
       });
 
-      for (const session of connectedSessions) {
+      for (const session of sessions) {
         const deviceName = session.deviceName?.trim();
         if (!deviceName) {
           continue;
         }
         const deviceContext = this.getOrCreateDeviceContext(deviceName);
         deviceContext.blePeripheralId = session.deviceId;
-        this.connectedChildDevices.set(session.deviceId, deviceName);
-        await this.client.connectChildDevice(deviceName);
+        const connected = session.connectionState === 'connected';
+        if (connected) {
+          this.connectedChildDevices.set(session.deviceId, deviceName);
+          await this.client.connectChildDevice(deviceName);
+        } else {
+          this.connectedChildDevices.delete(session.deviceId);
+          await this.client.disconnectChildDevice(deviceName);
+        }
         await this.client.publishChildAttributes(deviceName, {
           bleConnectionState: session.connectionState,
-          bleConnected: true,
+          bleConnected: connected,
           connectionStateText: this.getConnectionStateText(
             session.connectionState,
             session.lastError?.message,
           ),
-          connectedDeviceId: session.deviceId,
-          connectedDeviceName: deviceName,
+          connectedDeviceId: connected ? session.deviceId : '',
+          connectedDeviceName: connected ? deviceName : '',
           bleLastError: session.lastError?.message ?? '',
           blePeripheralId: session.deviceId,
           selectedSiteNumber: deviceContext.selectedSiteNumber,
@@ -250,6 +285,18 @@ export class ThingsBoardBridge {
     } finally {
       this.heartbeatInFlight = false;
     }
+  }
+
+  private async publishGatewayOffline(): Promise<void> {
+    const now = Date.now();
+    console.log('[TB-BRIDGE] publish gateway offline', { ts: now });
+    await this.client.publishTelemetry({
+      ts: now,
+      values: {
+        gatewayOnline: false,
+        gatewayOfflineTs: now,
+      },
+    });
   }
 
   private async pollRpcLoop(signal: AbortSignal): Promise<void> {
@@ -559,13 +606,22 @@ export class ThingsBoardBridge {
     this.lastConnectionUpdateTs = Date.now();
     console.log('[TB-BRIDGE] publish ble state', snapshot);
 
-    const connectedDevice = state.devices.find((item) => item.id === state.connectedDeviceId);
-    const connectedDeviceName = connectedDevice?.name?.trim() || '';
+    const connectedSessions = Object.values(state.sessions).filter(
+      (session) => session.connectionState === 'connected',
+    );
+    const activeSession = state.connectedDeviceId ? state.sessions[state.connectedDeviceId] : undefined;
+    const activeConnectedSession =
+      activeSession?.connectionState === 'connected' ? activeSession : connectedSessions[0];
+    const connectedDevice = activeConnectedSession
+      ? state.devices.find((item) => item.id === activeConnectedSession.deviceId)
+      : undefined;
+    const connectedDeviceName =
+      activeConnectedSession?.deviceName?.trim() || connectedDevice?.name?.trim() || '';
     const statusValues = {
       bleConnectionState: state.connectionState,
-      bleConnected: state.connectionState === 'connected',
+      bleConnected: connectedSessions.length > 0,
       connectionStateText: this.getConnectionStateText(state.connectionState, state.lastError?.message),
-      connectedDeviceId: state.connectedDeviceId ?? '',
+      connectedDeviceId: activeConnectedSession?.deviceId ?? '',
       connectedDeviceName,
       bleLastError: state.lastError?.message ?? '',
       lastConnectionUpdateTs: this.lastConnectionUpdateTs,

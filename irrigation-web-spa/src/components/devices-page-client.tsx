@@ -5,7 +5,12 @@ import { useNavigate } from "react-router-dom";
 import { DeviceListLive } from "@/components/device-list-live";
 import { LogoutButton } from "@/components/logout-button";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
-import { fetchDeviceListBasic, getCachedDeviceList } from "@/lib/client/thingsboard";
+import {
+  fetchDeviceList,
+  fetchDeviceListBasic,
+  getCachedDeviceList,
+  hasFullCachedDeviceList,
+} from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 
 export function DevicesPageClient() {
@@ -20,18 +25,41 @@ export function DevicesPageClient() {
       navigate("/login", { replace: true });
       return;
     }
+    if (devices.length > 0) {
+      setReady(true);
+      if (hasFullCachedDeviceList(session)) {
+        return;
+      }
+      void fetchDeviceList(session)
+        .then((items) => {
+          setDevices(items);
+          setError("");
+        })
+        .catch((loadError) => {
+          setError(loadError instanceof Error ? loadError.message : "设备状态补全失败");
+      });
+      return;
+    }
 
     void fetchDeviceListBasic(session)
       .then((items) => {
         setDevices(items);
         setError("");
         setReady(true);
+        return fetchDeviceList(session);
+      })
+      .then((items) => {
+        if (!items) {
+          return;
+        }
+        setDevices(items);
+        setError("");
       })
       .catch((loadError) => {
         setError(loadError instanceof Error ? loadError.message : "设备加载失败");
         setReady(true);
       });
-  }, [navigate, session]);
+  }, [devices.length, navigate, session]);
 
   if (!ready) {
     return <main className="appPage">加载中...</main>;

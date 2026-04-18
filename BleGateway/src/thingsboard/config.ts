@@ -7,8 +7,11 @@ export const thingsBoardConfig: ThingsBoardConfig = {
   accessToken: 'vj7vx72JEgoY22HFYnfm',
   rpcTimeoutMs: 20000,
 };
-// baseUrl: 'http://58.210.46.6',
-//   accessToken: '5LTbKEX3w33dzGGT16sX',
 
-// baseUrl: 'http://thingsboard.cloud',
-// accessToken: 'oajp0XLi2IrDsmBy0QyT',
+  // baseUrl: 'https://thingsboard.cloud',
+  // mqttUrl: 'mqtts://thingsboard.cloud:8883',
+  // accessToken: 'vj7vx72JEgoY22HFYnfm',
+
+  // baseUrl: 'https://58.210.46.6',
+  // mqttUrl: 'mqtts://58.210.46.6:6833',
+  // accessToken: 'JaSk3RobkIphu5jZF7v1',

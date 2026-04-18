@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "BleControlApp",
-    "slug": "BleControlApp",
+    "name": "蓝牙网关",
+    "slug": "ble-gateway",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -28,13 +28,12 @@
         "BLUETOOTH_SCAN",
         "BLUETOOTH_CONNECT",
         "ACCESS_FINE_LOCATION",
-        "BLUETOOTH_SCAN",
-        "BLUETOOTH_CONNECT",
-        "ACCESS_FINE_LOCATION"
+        "ACCESS_NETWORK_STATE",
+        "WAKE_LOCK"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0f766e"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,

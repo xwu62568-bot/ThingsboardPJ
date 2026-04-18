@@ -6,7 +6,6 @@ import {
   connectDevice,
   disconnectDevice,
   fetchDeviceDetail,
-  fetchDeviceListBasic,
   openTelemetrySocket,
   refreshDevice,
   runIrrigation,
@@ -107,12 +106,6 @@ export function DeviceConsole({
                 activeDeviceId,
               ),
             );
-            void fetchDeviceListBasic(null)
-              .then((nextDevices) => {
-                setDeviceList(nextDevices);
-                setDevice((current) => reconcileDeviceSiteCount(current, nextDevices, activeDeviceId));
-              })
-              .catch(() => undefined);
           })
           .catch(() => undefined)
           .finally(() => {

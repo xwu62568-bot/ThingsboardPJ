@@ -20,11 +20,17 @@ type RpcReplyMeta = {
 };
 
 export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
+  private static readonly reconnectBaseDelayMs = 2000;
+  private static readonly reconnectMaxDelayMs = 60000;
+
   private mqttConfig: Required<ThingsBoardConfig>;
   private mqttStore: ThingsBoardStore;
   private client?: IMqttClient;
   private connectPromise?: Promise<void>;
   private connectTimeout?: ReturnType<typeof setTimeout>;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private reconnectAttempts = 0;
+  private manualDisconnect = false;
   private connectResolver?: () => void;
   private connectRejector?: (error: Error) => void;
   private rpcQueue: ThingsBoardRpcRequest[] = [];
@@ -57,7 +63,7 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
       baseUrl: this.mqttConfig.baseUrl,
       mqttUrl: this.getMqttUri(),
       clientId: this.mqttClientId,
-      keepalive: 20,
+      keepalive: 60,
       accessTokenPreview: this.maskAccessToken(this.mqttConfig.accessToken),
     });
   }
@@ -77,6 +83,8 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     if (!this.isConfigured()) {
       return;
     }
+    this.manualDisconnect = false;
+    this.clearReconnectTimer();
     if (this.isConnected) {
       return;
     }
@@ -91,7 +99,7 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     });
 
     const mqttUrl = this.getMqttUri();
-    console.log('[TB-MQTT] connect start', { mqttUrl, keepalive: 20 });
+    console.log('[TB-MQTT] connect start', { mqttUrl, keepalive: 60 });
 
     this.connectPromise = new Promise<void>(async (resolve, reject) => {
       this.connectResolver = () => {
@@ -122,6 +130,8 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
   }
 
   async disconnect(): Promise<void> {
+    this.manualDisconnect = true;
+    this.clearReconnectTimer();
     this.flushPendingRpcResolvers();
     this.flushPendingAttributesResolvers();
     this.rpcQueue = [];
@@ -523,12 +533,17 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     const client = await MQTT.createClient({
       uri: mqttUri,
       clientId: this.mqttClientId,
-      keepalive: 20,
+      keepalive: 60,
       protocolLevel: 4,
       clean: false,
       auth: true,
       user: this.mqttConfig.accessToken,
       pass: '',
+      will: true,
+      willtopic: 'v1/devices/me/telemetry',
+      willMsg: JSON.stringify({ gatewayOnline: false }),
+      willQos: 1,
+      willRetainFlag: false,
       automaticReconnect: true,
       tls: mqttUri.startsWith('mqtts://'),
     });
@@ -553,6 +568,8 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
   private async handleConnectEvent(message: { reconnect: boolean }): Promise<void> {
     console.log('[TB-MQTT] connected', message);
     this.isConnected = true;
+    this.reconnectAttempts = 0;
+    this.clearReconnectTimer();
     this.mqttStore.setState({
       configured: true,
       connectionState: 'connected',
@@ -581,12 +598,12 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     this.coreTopicsSubscribed = false;
     if (this.connectPromise) {
       this.rejectPendingConnect(new Error('MQTT connection closed before ready'));
-      return;
     }
     this.mqttStore.setState({
       configured: this.isConfigured(),
       connectionState: this.isConfigured() ? 'idle' : 'disabled',
     });
+    this.scheduleReconnect('closed');
   }
 
   private handleErrorEvent(message: string): void {
@@ -604,6 +621,34 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     if (this.connectPromise) {
       this.rejectPendingConnect(new Error(message));
     }
+    this.scheduleReconnect('error');
+  }
+
+  private scheduleReconnect(reason: 'closed' | 'error'): void {
+    if (this.manualDisconnect || !this.isConfigured() || this.reconnectTimer) {
+      return;
+    }
+
+    const nextAttempts = this.reconnectAttempts + 1;
+    this.reconnectAttempts = nextAttempts;
+    const delay = Math.min(
+      ThingsBoardGatewayClient.reconnectBaseDelayMs * 2 ** (nextAttempts - 1),
+      ThingsBoardGatewayClient.reconnectMaxDelayMs,
+    );
+
+    console.log('[TB-MQTT] reconnect scheduled', { reason, attempts: nextAttempts, delay });
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.connect().catch((error) => this.setError(error));
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) {
+      return;
+    }
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 
   private resolvePendingConnect(): void {

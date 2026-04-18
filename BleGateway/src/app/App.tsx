@@ -55,11 +55,16 @@ export default function App(): React.JSX.Element {
 
   const handleAppState = (nextState: AppStateStatus) => {
     if (nextState !== 'active') {
-      bleService.setShouldReconnect(false);
       bleService.stopScan().catch(() => undefined);
       return;
     }
     bleService.setShouldReconnect(true);
+    thingsBoardBridge.resumeAfterForeground().catch((error) => {
+      thingsBoardStore.setState({
+        connectionState: 'error',
+        lastError: { message: error instanceof Error ? error.message : String(error) },
+      });
+    });
   };
 
   const onScan = async () => {

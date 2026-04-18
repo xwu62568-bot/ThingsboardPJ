@@ -2,6 +2,7 @@ import type {
   ConnectivityState,
   DeviceState,
   DeviceSummary,
+  GatewayState,
   IrrigationUser,
 } from "@/lib/domain/types";
 import { clearStoredSession, getStoredSession, type TbSession } from "./session";
@@ -24,6 +25,9 @@ const TELEMETRY_KEYS = [
   "lastValveStationId",
   "lastControlSource",
   "lastControlAppliedAt",
+  "gatewayHeartbeatTs",
+  "gatewayOnline",
+  "gatewayOfflineTs",
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}Open`),
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}RemainingSeconds`),
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}OpeningDurationSeconds`),
@@ -63,6 +67,7 @@ const gatewayCache = new Map<string, { id: string; name: string; expiresAt: numb
 const unsupportedDeviceInfosBaseUrls = new Set<string>();
 const unsupportedCustomerDeviceInfosKeys = new Set<string>();
 const deviceListCache = new Map<string, DeviceSummary[]>();
+const deviceListCacheMode = new Map<string, "basic" | "full">();
 const deviceDetailCache = new Map<string, DeviceState>();
 const debugListeners = new Set<(entry: TbDebugEntry) => void>();
 const debugBuffer: TbDebugEntry[] = [];
@@ -244,6 +249,7 @@ export async function fetchDeviceList(session?: TbSession | null): Promise<Devic
     mapToDeviceSummary(resolved, raw),
   );
   deviceListCache.set(getDeviceListCacheKey(resolved), devices);
+  deviceListCacheMode.set(getDeviceListCacheKey(resolved), "full");
   return devices;
 }
 
@@ -256,6 +262,7 @@ export async function fetchDeviceListBasic(session?: TbSession | null): Promise<
     return buildBaseDeviceSummary(item, itemId?.id ?? "");
   });
   deviceListCache.set(getDeviceListCacheKey(resolved), devices);
+  deviceListCacheMode.set(getDeviceListCacheKey(resolved), "basic");
   return devices;
 }
 
@@ -265,6 +272,15 @@ export function getCachedDeviceList(session?: TbSession | null): DeviceSummary[]
     return deviceListCache.get(getDeviceListCacheKey(resolved)) ?? [];
   } catch {
     return [];
+  }
+}
+
+export function hasFullCachedDeviceList(session?: TbSession | null): boolean {
+  try {
+    const resolved = resolveRequiredSession(session);
+    return deviceListCacheMode.get(getDeviceListCacheKey(resolved)) === "full";
+  } catch {
+    return false;
   }
 }
 
@@ -281,12 +297,13 @@ async function mapToDeviceSummary(
   }
 
   try {
-    const [telemetry, clientAttributes, sharedAttributes] = await Promise.all([
+    const [activityInfo, telemetry, clientAttributes, sharedAttributes] = await Promise.all([
+      resolveDeviceActivityInfo(session, deviceId, item),
       getLatestTelemetry(session, deviceId, TELEMETRY_KEYS),
       getAttributes(session, deviceId, "CLIENT_SCOPE", CLIENT_ATTRIBUTE_KEYS),
       getAttributes(session, deviceId, "SHARED_SCOPE", SHARED_ATTRIBUTE_KEYS),
     ]);
-    return enrichDeviceSummary(baseSummary, item, telemetry, clientAttributes, sharedAttributes);
+    return enrichDeviceSummary(baseSummary, activityInfo, telemetry, clientAttributes, sharedAttributes);
   } catch (error) {
     emitDebugLog({
       level: "error",
@@ -300,6 +317,37 @@ async function mapToDeviceSummary(
     });
     return baseSummary;
   }
+}
+
+async function resolveDeviceActivityInfo(
+  session: TbSession,
+  deviceId: string,
+  item: Record<string, unknown>,
+) {
+  if (hasDeviceActivityInfo(item)) {
+    return item;
+  }
+  try {
+    const info = await tbRequest(session, `/api/device/info/${deviceId}`);
+    if (info && typeof info === "object" && !Array.isArray(info)) {
+      return { ...item, ...(info as Record<string, unknown>) };
+    }
+  } catch (error) {
+    emitDebugLog({
+      level: "info",
+      scope: "rest",
+      message: "设备活跃状态补查失败，使用列表接口数据",
+      detail: serializeDetail({
+        deviceId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    });
+  }
+  return item;
+}
+
+function hasDeviceActivityInfo(item: Record<string, unknown>) {
+  return toBoolean(item.active) !== null || toInt(item.lastActivityTime) !== null;
 }
 
 function buildBaseDeviceSummary(
@@ -326,13 +374,18 @@ function buildBaseDeviceSummary(
     serialNumber:
       mapping?.serialNumber ||
       (typeof item.name === "string" ? item.name : deviceId),
-    platformState: item.active ? "active" : "inactive",
-    platformLastActivityAt: toInt(item.lastActivityTime) ?? 0,
+    platformState: resolvePlatformState(item),
+    platformLastActivityAt: resolvePlatformLastActivityAt(item),
     connectivityState: "disconnected" as ConnectivityState,
     lastSeenAt: toInt(item.lastActivityTime) ?? 0,
     selectedSiteNumber: 1,
     siteCount: mapping?.siteCount ?? inferredSiteCount,
     batteryLevel: 0,
+    isGateway: false,
+    gatewayState: "unknown",
+    gatewayHeartbeatAt: 0,
+    bleConnectivityState: "disconnected" as ConnectivityState,
+    statusChangedAt: 0,
   } satisfies DeviceSummary;
 }
 
@@ -370,12 +423,25 @@ function enrichDeviceSummary(
     toInt(clientAttributes.lastConnectionUpdateTs) ?? 0,
   );
 
+  const isGateway = isGatewayAttributes(clientAttributes);
+  const platformState = resolvePlatformState(item, base.platformState);
+  const bleConnectivityState = normalizeBleConnectivityState(clientAttributes, base);
+  const gatewayHeartbeatAt = toInt(telemetry.gatewayHeartbeatTs) ?? base.gatewayHeartbeatAt ?? 0;
+  const gatewayState = isGateway
+    ? normalizeGatewayState(gatewayHeartbeatAt, telemetry.gatewayOnline, platformState)
+    : undefined;
+  const statusChangedAt = toInt(clientAttributes.lastConnectionUpdateTs) ?? base.statusChangedAt ?? 0;
+
   return {
     ...base,
-    platformState: item.active ? "active" : "inactive",
-    platformLastActivityAt: toInt(item.lastActivityTime) ?? base.platformLastActivityAt,
-    connectivityState:
-      (normalizeConnectionState(clientAttributes.bleConnectionState) ?? base.connectivityState) as ConnectivityState,
+    isGateway,
+    gatewayState,
+    gatewayHeartbeatAt,
+    bleConnectivityState,
+    statusChangedAt,
+    platformState,
+    platformLastActivityAt: resolvePlatformLastActivityAt(item, base.platformLastActivityAt),
+    connectivityState: isGateway ? normalizeGatewayConnectivityState(gatewayState) : bleConnectivityState,
     lastSeenAt,
     selectedSiteNumber: clamp(selectedSiteNumber, 1, siteCount),
     siteCount,
@@ -545,10 +611,12 @@ export function openTelemetrySocket(
   const resolved = resolveRequiredSession(session);
   const url = buildTbWsUrl(resolved.baseUrl);
   const socket = new WebSocket(url);
+  let subscriptionDeviceIds = new Map<number, string>();
 
   socket.addEventListener("open", () => {
-    const body = buildSubscriptionMessage(resolved, deviceIds);
-    const parsed = JSON.parse(body) as { cmds?: unknown[] };
+    const subscription = buildSubscriptionMessage(resolved, deviceIds);
+    subscriptionDeviceIds = subscription.deviceIdsBySubscriptionId;
+    const parsed = JSON.parse(subscription.body) as { cmds?: unknown[] };
     if (!parsed.cmds?.length) {
       socket.close();
       return;
@@ -559,7 +627,7 @@ export function openTelemetrySocket(
       message: `WS 已连接并发送订阅，设备数 ${deviceIds.length}`,
       detail: serializeDetail({ url, deviceIds }),
     });
-    socket.send(body);
+    socket.send(subscription.body);
   });
 
   socket.addEventListener("message", (event) => {
@@ -575,7 +643,9 @@ export function openTelemetrySocket(
         message: "收到 TB WS 推送",
         detail: text.slice(0, 600),
       });
-      onActivity(parseTbWsMessage(parsed));
+      for (const message of parseTbWsMessages(parsed, subscriptionDeviceIds)) {
+        onActivity(message);
+      }
     } catch {
       // ignore non-JSON frames
     }
@@ -604,6 +674,7 @@ export function openTelemetrySocket(
 
 export type TbWsMessage = {
   subscriptionId?: number;
+  deviceId?: string;
   data?: Record<string, Array<[number, unknown]>>;
   latestValues?: Record<string, unknown>;
 };
@@ -625,6 +696,7 @@ function buildTbWsUrl(baseUrl: string) {
 function buildSubscriptionMessage(session: TbSession, deviceIds: string[]) {
   const lists = getTbWsSubscriptionKeyLists();
   const cmds: Record<string, unknown>[] = [];
+  const deviceIdsBySubscriptionId = new Map<number, string>();
   let cmdId = 1;
   const now = Date.now();
   const weekMs = 7 * 24 * 60 * 60 * 1000;
@@ -633,11 +705,14 @@ function buildSubscriptionMessage(session: TbSession, deviceIds: string[]) {
     if (!entityId?.trim()) {
       continue;
     }
+    const trimmedEntityId = entityId.trim();
+    const telemetryCmdId = cmdId++;
+    deviceIdsBySubscriptionId.set(telemetryCmdId, trimmedEntityId);
     cmds.push({
       type: "TIMESERIES",
-      cmdId: cmdId++,
+      cmdId: telemetryCmdId,
       entityType: "DEVICE",
-      entityId: entityId.trim(),
+      entityId: trimmedEntityId,
       keys: lists.telemetry,
       scope: "LATEST_TELEMETRY",
       startTs: now - weekMs,
@@ -646,28 +721,35 @@ function buildSubscriptionMessage(session: TbSession, deviceIds: string[]) {
       limit: 200,
       agg: "NONE",
     });
+    const clientAttributesCmdId = cmdId++;
+    deviceIdsBySubscriptionId.set(clientAttributesCmdId, trimmedEntityId);
     cmds.push({
       type: "ATTRIBUTES",
-      cmdId: cmdId++,
+      cmdId: clientAttributesCmdId,
       entityType: "DEVICE",
-      entityId: entityId.trim(),
+      entityId: trimmedEntityId,
       keys: lists.clientKeys,
       scope: "CLIENT_SCOPE",
     });
+    const sharedAttributesCmdId = cmdId++;
+    deviceIdsBySubscriptionId.set(sharedAttributesCmdId, trimmedEntityId);
     cmds.push({
       type: "ATTRIBUTES",
-      cmdId: cmdId++,
+      cmdId: sharedAttributesCmdId,
       entityType: "DEVICE",
-      entityId: entityId.trim(),
+      entityId: trimmedEntityId,
       keys: lists.sharedKeys,
       scope: "SHARED_SCOPE",
     });
   }
 
-  return JSON.stringify({
-    authCmd: { cmdId: 0, token: session.token },
-    cmds,
-  });
+  return {
+    body: JSON.stringify({
+      authCmd: { cmdId: 0, token: session.token },
+      cmds,
+    }),
+    deviceIdsBySubscriptionId,
+  };
 }
 
 function shouldTriggerDownstream(parsed: unknown): boolean {
@@ -683,20 +765,38 @@ function shouldTriggerDownstream(parsed: unknown): boolean {
   return false;
 }
 
-function parseTbWsMessage(parsed: unknown): TbWsMessage | undefined {
+function parseTbWsMessages(
+  parsed: unknown,
+  deviceIdsBySubscriptionId: Map<number, string>,
+): TbWsMessage[] {
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((item) => parseTbWsMessages(item, deviceIdsBySubscriptionId));
+  }
+  const message = parseTbWsMessage(parsed, deviceIdsBySubscriptionId);
+  return message ? [message] : [];
+}
+
+function parseTbWsMessage(
+  parsed: unknown,
+  deviceIdsBySubscriptionId: Map<number, string>,
+): TbWsMessage | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return undefined;
   }
   const item = parsed as {
     subscriptionId?: unknown;
+    entityId?: unknown;
     data?: unknown;
     latestValues?: unknown;
   };
   if (typeof item.subscriptionId !== "number") {
     return undefined;
   }
+  const mappedDeviceId = deviceIdsBySubscriptionId.get(item.subscriptionId);
+  const entityDeviceId = extractEntityId(item.entityId);
   return {
     subscriptionId: item.subscriptionId,
+    deviceId: mappedDeviceId || entityDeviceId,
     data: isRecord(item.data) ? normalizeWsData(item.data) : undefined,
     latestValues: isRecord(item.latestValues) ? item.latestValues : undefined,
   };
@@ -724,6 +824,7 @@ function normalizeWsData(input: Record<string, unknown>) {
 function clearTbClientCaches() {
   gatewayCache.clear();
   deviceListCache.clear();
+  deviceListCacheMode.clear();
   deviceDetailCache.clear();
 }
 
@@ -916,20 +1017,47 @@ async function resolveRpcGateway(
     return current.id;
   }
 
-  const devices = await fetchDeviceList(session);
-  for (const device of devices) {
-    const attrs = await getAttributes(session, device.id, "CLIENT_SCOPE", CLIENT_ATTRIBUTE_KEYS);
-    if (!isGatewayAttributes(attrs)) {
-      continue;
-    }
-    const resolved = { id: device.id, name: device.name, expiresAt: Date.now() + 30_000 };
-    gatewayCache.set(cacheKey, resolved);
-    detail.rpcGatewayId = resolved.id;
-    detail.rpcGatewayName = resolved.name;
-    return resolved.id;
+  const gateway = await discoverRpcGateway(session);
+  if (gateway) {
+    gatewayCache.set(cacheKey, gateway);
+    detail.rpcGatewayId = gateway.id;
+    detail.rpcGatewayName = gateway.name;
+    return gateway.id;
   }
 
   return detail.id;
+}
+
+async function discoverRpcGateway(session: TbSession) {
+  const cachedDevices = deviceListCache.get(getDeviceListCacheKey(session)) ?? [];
+  const candidates = cachedDevices.length
+    ? cachedDevices
+    : (await fetchAccessibleDeviceRows(session)).map((raw) => {
+        const item = (raw ?? {}) as Record<string, unknown>;
+        const itemId = item.id as { id?: string } | undefined;
+        return buildBaseDeviceSummary(item, itemId?.id ?? "");
+      });
+
+  const matches = await mapWithConcurrency(candidates, DEVICE_LIST_ENRICH_CONCURRENCY, async (device) => {
+    if (!device.id) {
+      return null;
+    }
+    try {
+      const attrs = await getAttributes(session, device.id, "CLIENT_SCOPE", CLIENT_ATTRIBUTE_KEYS);
+      if (!isGatewayAttributes(attrs)) {
+        return null;
+      }
+      return {
+        id: device.id,
+        name: device.name,
+        expiresAt: Date.now() + 30_000,
+      };
+    } catch {
+      return null;
+    }
+  });
+
+  return matches.find((item): item is { id: string; name: string; expiresAt: number } => item !== null);
 }
 
 async function sendDeviceRpc(
@@ -1178,10 +1306,17 @@ function mapToDeviceState(
   });
 
   const lastCommand = buildLastCommand(telemetry, clientAttributes);
+  const platformState = resolvePlatformState(info);
+  const deviceIdentity = {
+    name: typeof info.name === "string" ? info.name : "未命名设备",
+    serialNumber: mapping?.serialNumber || (typeof info.name === "string" ? info.name : infoId?.id ?? ""),
+    platformState,
+    connectivityState: "disconnected" as ConnectivityState,
+  };
 
   return {
     id: infoId?.id ?? "",
-    name: typeof info.name === "string" ? info.name : "未命名设备",
+    name: deviceIdentity.name,
     model:
       mapping?.model ||
       (typeof info.type === "string" && info.type) ||
@@ -1200,10 +1335,9 @@ function mapToDeviceState(
       "",
     rpcGatewayId: mapping?.rpcDeviceId,
     rpcGatewayName: mapping?.rpcGatewayName,
-    platformState: info.active ? "active" : "inactive",
-    platformLastActivityAt: toInt(info.lastActivityTime) ?? 0,
-    connectivityState:
-      (normalizeConnectionState(clientAttributes.bleConnectionState) ?? "disconnected") as ConnectivityState,
+    platformState,
+    platformLastActivityAt: resolvePlatformLastActivityAt(info),
+    connectivityState: normalizeBleConnectivityState(clientAttributes, deviceIdentity),
     lastSeenAt: lastSeenAt || Date.now(),
     signalRssi: -70,
     siteCount,
@@ -1447,6 +1581,71 @@ function normalizeConnectionState(value: unknown): ConnectivityState | null {
     return "disconnected";
   }
   return null;
+}
+
+function normalizeBleConnectivityState(
+  clientAttributes: Record<string, unknown>,
+  device: Pick<DeviceSummary, "name" | "serialNumber" | "platformState" | "connectivityState">,
+): ConnectivityState {
+  const connectedName =
+    typeof clientAttributes.connectedDeviceName === "string"
+      ? clientAttributes.connectedDeviceName.trim()
+      : "";
+  const nameMatches =
+    !connectedName || connectedName === device.name || connectedName === device.serialNumber;
+  if (!nameMatches) {
+    return "disconnected";
+  }
+
+  const bleConnected = toBoolean(clientAttributes.bleConnected);
+  if (bleConnected === true) {
+    return "connected";
+  }
+  if (bleConnected === false) {
+    return "disconnected";
+  }
+
+  return normalizeConnectionState(clientAttributes.bleConnectionState) ?? device.connectivityState;
+}
+
+function normalizeGatewayState(
+  heartbeatTs: number,
+  gatewayOnline: unknown,
+  platformState: "active" | "inactive",
+): GatewayState {
+  const online = toBoolean(gatewayOnline);
+  if (online === false) {
+    return "offline";
+  }
+  if (heartbeatTs && Date.now() - heartbeatTs < 2 * 60 * 1000) {
+    return "online";
+  }
+  if (heartbeatTs || platformState === "inactive") {
+    return "offline";
+  }
+  return "unknown";
+}
+
+function normalizeGatewayConnectivityState(gatewayState?: GatewayState): ConnectivityState {
+  return gatewayState === "online" ? "connected" : "disconnected";
+}
+
+function resolvePlatformState(
+  item: Record<string, unknown>,
+  fallback: "active" | "inactive" = "inactive",
+): "active" | "inactive" {
+  const active = toBoolean(item.active);
+  if (active !== null) {
+    return active ? "active" : "inactive";
+  }
+  return fallback;
+}
+
+function resolvePlatformLastActivityAt(
+  item: Record<string, unknown>,
+  fallback = 0,
+): number {
+  return toInt(item.lastActivityTime) ?? fallback;
 }
 
 function shouldFallbackToTenantDevices(error: unknown) {
