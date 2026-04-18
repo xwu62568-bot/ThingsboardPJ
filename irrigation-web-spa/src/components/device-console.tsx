@@ -6,7 +6,7 @@ import {
   connectDevice,
   disconnectDevice,
   fetchDeviceDetail,
-  fetchDeviceList,
+  fetchDeviceListBasic,
   openTelemetrySocket,
   refreshDevice,
   runIrrigation,
@@ -21,13 +21,16 @@ type Props = {
 };
 
 type ActionKind = "connect" | "disconnect" | "refresh" | "run" | "stop" | null;
+const AUTO_REFRESH_MIN_INTERVAL_MS = 30_000;
 
 export function DeviceConsole({
   initialDevice,
   devices,
   activeDeviceId,
 }: Props) {
-  const [device, setDevice] = useState(initialDevice);
+  const [device, setDevice] = useState(() =>
+    reconcileDeviceSiteCount(initialDevice, devices, activeDeviceId),
+  );
   const [deviceList, setDeviceList] = useState(devices);
   const [selectedSiteNumber, setSelectedSiteNumber] = useState(
     initialDevice.selectedSiteNumber,
@@ -47,14 +50,19 @@ export function DeviceConsole({
   const [lastPushAt, setLastPushAt] = useState(0);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshInFlightRef = useRef(false);
+  const lastAutoRefreshAtRef = useRef(0);
 
   useEffect(() => {
-    setDevice(initialDevice);
-  }, [initialDevice]);
+    setDevice(reconcileDeviceSiteCount(initialDevice, devices, activeDeviceId));
+  }, [activeDeviceId, devices, initialDevice]);
 
   useEffect(() => {
     setDeviceList(devices);
   }, [devices]);
+
+  useEffect(() => {
+    setDevice((current) => reconcileDeviceSiteCount(current, deviceList, activeDeviceId));
+  }, [activeDeviceId, deviceList]);
 
   useEffect(() => {
     setSelectedSiteNumber((current) => {
@@ -76,7 +84,11 @@ export function DeviceConsole({
       if (disposed) {
         return;
       }
-      setLastPushAt(Date.now());
+      const now = Date.now();
+      setLastPushAt(now);
+      if (now - lastAutoRefreshAtRef.current < AUTO_REFRESH_MIN_INTERVAL_MS) {
+        return;
+      }
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
       }
@@ -85,12 +97,20 @@ export function DeviceConsole({
           return;
         }
         refreshInFlightRef.current = true;
+        lastAutoRefreshAtRef.current = Date.now();
         void fetchDeviceDetail(null, activeDeviceId)
           .then((nextDevice) => {
-            setDevice(nextDevice);
-            void fetchDeviceList(null)
+            setDevice((current) =>
+              reconcileDeviceSiteCount(
+                nextDevice,
+                deviceListForReconcile(current, deviceList),
+                activeDeviceId,
+              ),
+            );
+            void fetchDeviceListBasic(null)
               .then((nextDevices) => {
                 setDeviceList(nextDevices);
+                setDevice((current) => reconcileDeviceSiteCount(current, nextDevices, activeDeviceId));
               })
               .catch(() => undefined);
           })
@@ -161,7 +181,13 @@ export function DeviceConsole({
       }
 
       const nextDevice = await operation();
-      setDevice(nextDevice);
+      setDevice((current) =>
+        reconcileDeviceSiteCount(
+          nextDevice,
+          deviceListForReconcile(current, deviceList),
+          activeDeviceId,
+        ),
+      );
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "操作失败");
     } finally {
@@ -171,48 +197,9 @@ export function DeviceConsole({
 
   const currentSite =
     device.sites.find((site) => site.siteNumber === selectedSiteNumber) ?? device.sites[0];
-  const railDevices =
-    deviceList.length > 0
-      ? deviceList
-      : [
-          {
-            id: device.id,
-            name: device.name,
-            model: device.model,
-            serialNumber: device.serialNumber,
-            platformState: device.platformState,
-            platformLastActivityAt: device.platformLastActivityAt,
-            connectivityState: device.connectivityState,
-            lastSeenAt: device.lastSeenAt,
-            selectedSiteNumber: device.selectedSiteNumber,
-            siteCount: device.siteCount,
-            batteryLevel: device.batteryLevel,
-          },
-        ];
 
   return (
     <div className="consoleLayout">
-      <aside className="deviceRail">
-        <div className="panelTitle">设备清单</div>
-        <div className="deviceRailList">
-          {railDevices.map((item) => (
-            <Link
-              key={item.id}
-              className={`deviceRailCard ${item.id === activeDeviceId ? "active" : ""}`}
-              to={`/devices/${item.id}`}
-            >
-              <div>
-                <strong>{item.name}</strong>
-                <p>{item.model}</p>
-              </div>
-              <span className={`statusPill ${item.connectivityState}`}>
-                {formatConnectionState(item.connectivityState)}
-              </span>
-            </Link>
-          ))}
-        </div>
-      </aside>
-
       <main className="deviceMain">
         <section className="heroPanel">
           <div>
@@ -303,7 +290,7 @@ export function DeviceConsole({
               />
               <InfoRow label="RSSI" value={`${device.signalRssi} dBm`} />
               <InfoRow label="RTC 时间" value={formatTime(device.rtcTimestamp)} />
-              <InfoRow label="选中路数" value={`${device.selectedSiteNumber} / ${device.siteCount}`} />
+              <InfoRow label="选中站点" value={`${device.selectedSiteNumber} / ${device.siteCount}`} />
               <InfoRow label="电压" value={`${device.batteryVoltage.toFixed(2)} V`} />
             </dl>
           </div>
@@ -317,7 +304,7 @@ export function DeviceConsole({
             </div>
             <div className="fieldGrid">
               <label className="field">
-                <span>路数</span>
+                <span>站点</span>
                 <select
                   value={selectedSiteNumber}
                   onChange={(event) => setSelectedSiteNumber(Number(event.target.value))}
@@ -405,7 +392,7 @@ export function DeviceConsole({
           <div className="panel panelWide">
             <div className="panelHeader">
               <div>
-                <div className="panelTitle">路数实时状态</div>
+                <div className="panelTitle">站点实时状态</div>
                 <p className="muted">对应网关解析后的站点状态、剩余时长和开启累计时长。</p>
               </div>
             </div>
@@ -517,4 +504,56 @@ function formatSeconds(value: number) {
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
   return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function reconcileDeviceSiteCount(
+  device: DeviceState,
+  devices: DeviceSummary[],
+  activeDeviceId: string,
+): DeviceState {
+  const summary = devices.find((item) => item.id === activeDeviceId);
+  if (!summary || summary.siteCount === device.siteCount) {
+    return device;
+  }
+  const siteCount = Math.max(1, summary.siteCount);
+  return {
+    ...device,
+    siteCount,
+    selectedSiteNumber: Math.min(device.selectedSiteNumber, siteCount),
+    sites: Array.from({ length: siteCount }, (_, index) => {
+      const siteNumber = index + 1;
+      const current = device.sites.find((site) => site.siteNumber === siteNumber);
+      return (
+        current ?? {
+          siteNumber,
+          label: `站点${siteNumber}`,
+          open: false,
+          remainingSeconds: 0,
+          openingDurationSeconds: 0,
+          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? 600,
+        }
+      );
+    }),
+  };
+}
+
+function deviceListForReconcile(device: DeviceState, devices: DeviceSummary[]) {
+  if (devices.length > 0) {
+    return devices;
+  }
+  return [
+    {
+      id: device.id,
+      name: device.name,
+      model: device.model,
+      serialNumber: device.serialNumber,
+      platformState: device.platformState,
+      platformLastActivityAt: device.platformLastActivityAt,
+      connectivityState: device.connectivityState,
+      lastSeenAt: device.lastSeenAt,
+      selectedSiteNumber: device.selectedSiteNumber,
+      siteCount: device.siteCount,
+      batteryLevel: device.batteryLevel,
+    },
+  ];
 }

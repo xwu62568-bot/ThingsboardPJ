@@ -2,8 +2,9 @@ import type { ThingsBoardConfig } from './ThingsBoardTypes';
 
 // Fill these with your ThingsBoard device endpoint and token.
 export const thingsBoardConfig: ThingsBoardConfig = {
- baseUrl: 'http://thingsboard.cloud',
- accessToken: 'vj7vx72JEgoY22HFYnfm',
+  baseUrl: 'https://thingsboard.cloud',
+  mqttUrl: 'mqtts://thingsboard.cloud:8883',
+  accessToken: 'vj7vx72JEgoY22HFYnfm',
   rpcTimeoutMs: 20000,
 };
 // baseUrl: 'http://58.210.46.6',

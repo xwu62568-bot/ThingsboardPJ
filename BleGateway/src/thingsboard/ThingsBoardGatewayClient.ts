@@ -11,6 +11,7 @@ import type {
 type PendingRpcResolver = (rpc: ThingsBoardRpcRequest | null) => void;
 type PendingAttributesResolver = (payload: ThingsBoardAttributesPayload) => void;
 type GatewayAttributesUpdate = { device: string; data: Record<string, unknown> };
+type MqttConnectionUpdate = { reconnect: boolean };
 
 type RpcReplyMeta = {
   originalId: string;
@@ -34,16 +35,19 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
   >();
   private attributeListeners = new Set<(payload: ThingsBoardAttributesPayload) => void>();
   private gatewayAttributeListeners = new Set<(payload: GatewayAttributesUpdate) => void>();
+  private connectionListeners = new Set<(payload: MqttConnectionUpdate) => void>();
   private rpcReplyMeta = new Map<string, RpcReplyMeta>();
   private coreTopicsSubscribed = false;
   private isConnected = false;
   private attributeRequestId = 0;
+  private readonly mqttClientId: string;
 
   constructor(config: ThingsBoardConfig, store: ThingsBoardStore) {
     const normalizedConfig = ThingsBoardHttpClient.normalizeConfig(config);
     super(normalizedConfig, store);
     this.mqttConfig = normalizedConfig;
     this.mqttStore = store;
+    this.mqttClientId = this.buildStableClientId();
     this.mqttStore.setState({
       configured: this.isConfigured(),
       connectionState: this.isConfigured() ? 'idle' : 'disabled',
@@ -52,6 +56,8 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
       configured: this.isConfigured(),
       baseUrl: this.mqttConfig.baseUrl,
       mqttUrl: this.getMqttUri(),
+      clientId: this.mqttClientId,
+      keepalive: 20,
       accessTokenPreview: this.maskAccessToken(this.mqttConfig.accessToken),
     });
   }
@@ -85,7 +91,7 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     });
 
     const mqttUrl = this.getMqttUri();
-    console.log('[TB-MQTT] connect start', { mqttUrl });
+    console.log('[TB-MQTT] connect start', { mqttUrl, keepalive: 20 });
 
     this.connectPromise = new Promise<void>(async (resolve, reject) => {
       this.connectResolver = () => {
@@ -340,6 +346,11 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     return () => this.gatewayAttributeListeners.delete(listener);
   }
 
+  onConnected(listener: (payload: MqttConnectionUpdate) => void): () => void {
+    this.connectionListeners.add(listener);
+    return () => this.connectionListeners.delete(listener);
+  }
+
   private async subscribeCoreTopics(): Promise<void> {
     const client = this.client;
     if (!client) {
@@ -511,10 +522,10 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     const mqttUri = this.getMqttUri();
     const client = await MQTT.createClient({
       uri: mqttUri,
-      clientId: `ble-gateway-${Math.random().toString(16).slice(2, 10)}`,
-      keepalive: 60,
+      clientId: this.mqttClientId,
+      keepalive: 20,
       protocolLevel: 4,
-      clean: true,
+      clean: false,
       auth: true,
       user: this.mqttConfig.accessToken,
       pass: '',
@@ -550,6 +561,9 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     });
     try {
       await this.subscribeCoreTopics();
+      for (const listener of this.connectionListeners) {
+        listener(message);
+      }
       this.resolvePendingConnect();
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
@@ -558,7 +572,11 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
   }
 
   private handleClosedEvent(message: string): void {
-    console.log('[TB-MQTT] connection closed', message);
+    console.log('[TB-MQTT] connection closed', {
+      message,
+      mqttUrl: this.getMqttUri(),
+      clientId: this.mqttClientId,
+    });
     this.isConnected = false;
     this.coreTopicsSubscribed = false;
     if (this.connectPromise) {
@@ -572,7 +590,11 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
   }
 
   private handleErrorEvent(message: string): void {
-    console.log('[TB-MQTT] error', message);
+    console.log('[TB-MQTT] error', {
+      message,
+      mqttUrl: this.getMqttUri(),
+      clientId: this.mqttClientId,
+    });
     this.isConnected = false;
     this.mqttStore.setState({
       configured: this.isConfigured(),
@@ -619,6 +641,13 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
       return `${token.slice(0, 2)}***`;
     }
     return `${token.slice(0, 4)}***${token.slice(-4)}`;
+  }
+
+  private buildStableClientId(): string {
+    const base = new URL(this.mqttConfig.baseUrl);
+    const host = base.hostname.replace(/[^a-zA-Z0-9]/g, '-');
+    const tokenSuffix = this.mqttConfig.accessToken.slice(-6) || 'token';
+    return `ble-gateway-${host}-${tokenSuffix}`;
   }
 
   private updateAttributesState(

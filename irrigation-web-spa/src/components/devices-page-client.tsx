@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { DeviceListLive } from "@/components/device-list-live";
 import { LogoutButton } from "@/components/logout-button";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
-import { fetchDeviceList, getCachedDeviceList } from "@/lib/client/thingsboard";
+import { fetchDeviceListBasic, getCachedDeviceList } from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 
 export function DevicesPageClient() {
@@ -21,7 +21,7 @@ export function DevicesPageClient() {
       return;
     }
 
-    void fetchDeviceList(session)
+    void fetchDeviceListBasic(session)
       .then((items) => {
         setDevices(items);
         setError("");

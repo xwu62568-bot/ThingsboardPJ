@@ -116,7 +116,7 @@ export class BleService {
   }
 
   async startScan(serviceUUIDs?: string[]): Promise<void> {
-    this.scanLoopEnabled = true;
+    this.scanLoopEnabled = false;
     this.lastScanServiceUUIDs = serviceUUIDs?.length ? serviceUUIDs : undefined;
     if (this.scanRestartTimer) {
       clearTimeout(this.scanRestartTimer);
@@ -367,13 +367,6 @@ export class BleService {
     const stopScan = BleManager.onStopScan(() => {
       console.log('[BLE] scan stopped');
       this.store.setScanning(false);
-      if (!this.scanLoopEnabled) {
-        return;
-      }
-      this.scanRestartTimer = setTimeout(() => {
-        this.scanRestartTimer = undefined;
-        void this.runScanCycle(false);
-      }, 600);
     });
 
     const disconnect = BleManager.onDisconnectPeripheral((payload: { peripheral: string }) => {

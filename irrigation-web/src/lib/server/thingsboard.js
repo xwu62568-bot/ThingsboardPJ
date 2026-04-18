@@ -100,6 +100,10 @@ function buildThingsBoardHttpError(status, path, rawBody) {
   });
 }
 
+function isRpcConflictError(error) {
+  return error instanceof ThingsBoardHttpError && error.status === 409 && error.path.includes("/api/plugins/rpc/");
+}
+
 export async function loginToThingsBoard(input) {
   const baseUrl = normalizeBaseUrl(input.baseUrl);
   const response = await fetch(`${baseUrl}/api/auth/login`, {
@@ -485,14 +489,30 @@ async function sendRpc(session, deviceId, method, params) {
       params,
     })}`,
   );
-  await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
-    method: "POST",
-    body: JSON.stringify({
-      method,
-      params,
-      timeout: 20000,
-    }),
-  });
+  try {
+    await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        method,
+        params,
+        timeout: 20000,
+      }),
+    });
+  } catch (error) {
+    if (!isRpcConflictError(error)) {
+      throw error;
+    }
+    gatewayCache.delete(`${session.tb.baseUrl}:${session.user.id}`);
+    await wait(1500);
+    await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        method,
+        params,
+        timeout: 20000,
+      }),
+    });
+  }
 }
 
 async function getLatestTelemetry(session, deviceId, keys) {

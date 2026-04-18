@@ -89,6 +89,7 @@ function createDisabledThingsBoardClient(error: unknown): BridgeClient {
           : thingsBoardStore.getState().latestGatewayValuesByDevice,
       });
     },
+    onConnected: () => () => undefined,
   } as unknown as BridgeClient;
 }
 

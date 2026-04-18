@@ -131,7 +131,6 @@ select {
 .loginCard,
 .panel,
 .heroPanel,
-.deviceRail,
 .footerNotice {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -210,7 +209,7 @@ select {
 
 .consoleLayout {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   min-width: 0;
 }

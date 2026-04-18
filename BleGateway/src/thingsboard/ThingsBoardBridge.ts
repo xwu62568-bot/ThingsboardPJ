@@ -45,6 +45,7 @@ export class ThingsBoardBridge {
     'targetDeviceName',
   ];
   private static readonly pendingConnectTimeoutMs = 60000;
+  private static readonly heartbeatIntervalMs = 45000;
 
   private client: ThingsBoardGatewayClient;
   private bleService: BleService;
@@ -56,6 +57,10 @@ export class ThingsBoardBridge {
   private notifyUnsubscribe?: () => void;
   private attributesUnsubscribe?: () => void;
   private gatewayAttributesUnsubscribe?: () => void;
+  private connectionUnsubscribe?: () => void;
+  private mqttResyncPromise?: Promise<void>;
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private heartbeatInFlight = false;
   private lastBleSnapshot = '';
   private lastCloudStatusSnapshot = '';
   private lastSharedControlSnapshot = '';
@@ -113,6 +118,12 @@ export class ThingsBoardBridge {
 
     this.disposed = false;
     console.log('[TB-BRIDGE] start');
+    this.connectionUnsubscribe = this.client.onConnected((payload) => {
+      if (!payload.reconnect) {
+        return;
+      }
+      this.resyncAfterMqttReconnect().catch((error) => this.client.setError(error));
+    });
     this.client.connect().catch((error) => this.client.setError(error));
     this.publishBootAttributes().catch((error) => this.client.setError(error));
     this.publishBleState(this.bleStore.getState()).catch((error) => this.client.setError(error));
@@ -134,6 +145,7 @@ export class ThingsBoardBridge {
     });
     this.rpcAbort = new AbortController();
     this.pollRpcLoop(this.rpcAbort.signal).catch((error) => this.client.setError(error));
+    this.startHeartbeat();
   }
 
   stop(): void {
@@ -152,8 +164,16 @@ export class ThingsBoardBridge {
     this.attributesUnsubscribe = undefined;
     this.gatewayAttributesUnsubscribe?.();
     this.gatewayAttributesUnsubscribe = undefined;
+    this.connectionUnsubscribe?.();
+    this.connectionUnsubscribe = undefined;
     this.notifyUnsubscribe?.();
     this.notifyUnsubscribe = undefined;
+    this.mqttResyncPromise = undefined;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    this.heartbeatInFlight = false;
   }
 
   requestDeviceSnapshotNow(deviceId?: string): Promise<void> {
@@ -162,6 +182,74 @@ export class ThingsBoardBridge {
 
   refreshCloudStateNow(): Promise<void> {
     return this.refreshCloudState();
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      return;
+    }
+    this.heartbeatTimer = setInterval(() => {
+      this.publishHeartbeat().catch((error) => this.client.setError(error));
+    }, ThingsBoardBridge.heartbeatIntervalMs);
+  }
+
+  private async publishHeartbeat(): Promise<void> {
+    if (this.disposed || this.heartbeatInFlight) {
+      return;
+    }
+
+    this.heartbeatInFlight = true;
+    try {
+      const state = this.bleStore.getState();
+      const now = Date.now();
+      const connectedSessions = Object.values(state.sessions).filter(
+        (session) => session.connectionState === 'connected' && session.deviceName?.trim(),
+      );
+      console.log('[TB-BRIDGE] heartbeat', {
+        connectionState: state.connectionState,
+        connectedDeviceId: state.connectedDeviceId,
+        connectedChildCount: connectedSessions.length,
+      });
+
+      await this.client.publishTelemetry({
+        ts: now,
+        values: {
+          gatewayHeartbeatTs: now,
+          bleConnectionState: state.connectionState,
+          bleConnected: connectedSessions.length > 0 || state.connectionState === 'connected',
+          connectedDeviceId: state.connectedDeviceId ?? '',
+          connectedChildCount: connectedSessions.length,
+        },
+      });
+
+      for (const session of connectedSessions) {
+        const deviceName = session.deviceName?.trim();
+        if (!deviceName) {
+          continue;
+        }
+        const deviceContext = this.getOrCreateDeviceContext(deviceName);
+        deviceContext.blePeripheralId = session.deviceId;
+        this.connectedChildDevices.set(session.deviceId, deviceName);
+        await this.client.connectChildDevice(deviceName);
+        await this.client.publishChildAttributes(deviceName, {
+          bleConnectionState: session.connectionState,
+          bleConnected: true,
+          connectionStateText: this.getConnectionStateText(
+            session.connectionState,
+            session.lastError?.message,
+          ),
+          connectedDeviceId: session.deviceId,
+          connectedDeviceName: deviceName,
+          bleLastError: session.lastError?.message ?? '',
+          blePeripheralId: session.deviceId,
+          selectedSiteNumber: deviceContext.selectedSiteNumber,
+          siteCount: deviceContext.siteCount,
+          gatewayHeartbeatTs: now,
+        });
+      }
+    } finally {
+      this.heartbeatInFlight = false;
+    }
   }
 
   private async pollRpcLoop(signal: AbortSignal): Promise<void> {
@@ -549,6 +637,88 @@ export class ThingsBoardBridge {
     await this.requestDeviceSnapshot(device.id);
   }
 
+  private async resyncAfterMqttReconnect(): Promise<void> {
+    if (this.mqttResyncPromise) {
+      return this.mqttResyncPromise;
+    }
+
+    this.mqttResyncPromise = this.doResyncAfterMqttReconnect().finally(() => {
+      this.mqttResyncPromise = undefined;
+    });
+    return this.mqttResyncPromise;
+  }
+
+  private async doResyncAfterMqttReconnect(): Promise<void> {
+    const state = this.bleStore.getState();
+    console.log('[TB-BRIDGE] mqtt reconnected, resync gateway children', {
+      connectionState: state.connectionState,
+      connectedDeviceId: state.connectedDeviceId,
+      sessionCount: Object.keys(state.sessions).length,
+    });
+
+    this.lastBleSnapshot = '';
+    this.lastCloudStatusSnapshot = '';
+    this.lastChildBleSnapshots.clear();
+
+    await this.publishBootAttributes();
+    await this.reconnectActiveChildDevices(state);
+    await this.publishBleState(state);
+  }
+
+  private async reconnectActiveChildDevices(
+    state: ReturnType<BleStore['getState']>,
+  ): Promise<void> {
+    const activeSessions = Object.values(state.sessions).filter(
+      (session) => session.connectionState === 'connected' && session.deviceName?.trim(),
+    );
+
+    for (const session of activeSessions) {
+      const deviceName = session.deviceName?.trim();
+      if (!deviceName) {
+        continue;
+      }
+
+      const deviceContext = this.getOrCreateDeviceContext(deviceName);
+      deviceContext.blePeripheralId = session.deviceId;
+      deviceContext.lastConnectionUpdateTs = Date.now();
+      this.connectedChildDevices.set(session.deviceId, deviceName);
+
+      console.log('[TB-BRIDGE] reconnect child after mqtt reconnect', {
+        deviceId: session.deviceId,
+        deviceName,
+        siteCount: deviceContext.siteCount,
+      });
+
+      await this.client.connectChildDevice(deviceName);
+      await this.client.publishAttributes({
+        targetDeviceName: deviceName,
+        targetDeviceId: session.deviceId,
+        selectedSiteNumber: deviceContext.selectedSiteNumber,
+        siteCount: deviceContext.siteCount,
+      });
+      await this.syncChildBleState(
+        session.deviceId,
+        deviceName,
+        {
+          bleConnectionState: session.connectionState,
+          bleConnected: true,
+          connectionStateText: this.getConnectionStateText(
+            session.connectionState,
+            session.lastError?.message,
+          ),
+          connectedDeviceId: session.deviceId,
+          connectedDeviceName: deviceName,
+          bleLastError: session.lastError?.message ?? '',
+          reconnectAttempts: session.reconnectAttempts,
+          selectedSiteNumber: deviceContext.selectedSiteNumber,
+          siteCount: deviceContext.siteCount,
+        },
+        session.connectionState,
+        { force: true },
+      );
+    }
+  }
+
   private async ensureBleDeviceConnected(
     deviceName?: string,
   ): Promise<{ deviceId: string; deviceName: string }> {
@@ -585,12 +755,13 @@ export class ThingsBoardBridge {
         : undefined) ??
       this.bleStore.getState().devices.find((item) => item.name === deviceName);
     if (!device) {
-      console.log('[TB-BRIDGE] target device not in cache, scanning', { deviceName, deviceIdHint });
-      await this.bleService.startScan([]);
-      device = await this.waitForPendingBleConnect(deviceName, deviceIdHint);
-    }
-    if (!device) {
-      throw new Error(`Device not found: ${deviceName}${deviceIdHint ? ` (${deviceIdHint})` : ''}`);
+      console.log('[TB-BRIDGE] target device not in cache, manual scan required', {
+        deviceName,
+        deviceIdHint,
+      });
+      throw new Error(
+        `Device not found in cache: ${deviceName}${deviceIdHint ? ` (${deviceIdHint})` : ''}. Please scan manually first.`,
+      );
     }
     return device;
   }
@@ -729,12 +900,13 @@ export class ThingsBoardBridge {
     deviceName: string,
     values: Record<string, unknown>,
     connectionState: ReturnType<BleStore['getState']>['connectionState'],
+    options?: { force?: boolean },
   ): Promise<void> {
     if (!deviceName) {
       return;
     }
     const snapshot = JSON.stringify({ deviceName, values });
-    if (snapshot === this.lastChildBleSnapshots.get(deviceId)) {
+    if (!options?.force && snapshot === this.lastChildBleSnapshots.get(deviceId)) {
       return;
     }
     this.lastChildBleSnapshots.set(deviceId, snapshot);

@@ -7,7 +7,7 @@ import { LogoutButton } from "@/components/logout-button";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
 import {
   fetchDeviceDetail,
-  fetchDeviceList,
+  fetchDeviceListBasic,
   getCachedDeviceDetail,
   getCachedDeviceList,
 } from "@/lib/client/thingsboard";
@@ -36,9 +36,13 @@ export function DevicePageClient() {
         setDevice(currentDevice);
         setError("");
         setReady(true);
-        void fetchDeviceList(session)
+        void fetchDeviceListBasic(session)
           .then((deviceList) => {
             setDevices(deviceList);
+            const summary = deviceList.find((item) => item.id === deviceId);
+            if (summary) {
+              setDevice((existing) => reconcileDeviceSiteCount(existing, summary));
+            }
           })
           .catch(() => undefined);
       })
@@ -82,4 +86,33 @@ export function DevicePageClient() {
       />
     </main>
   );
+}
+
+function reconcileDeviceSiteCount(
+  device: DeviceState | null,
+  summary: DeviceSummary,
+): DeviceState | null {
+  if (!device || summary.siteCount === device.siteCount) {
+    return device;
+  }
+  const siteCount = Math.max(1, summary.siteCount);
+  return {
+    ...device,
+    siteCount,
+    selectedSiteNumber: Math.min(device.selectedSiteNumber, siteCount),
+    sites: Array.from({ length: siteCount }, (_, index) => {
+      const siteNumber = index + 1;
+      const current = device.sites.find((site) => site.siteNumber === siteNumber);
+      return (
+        current ?? {
+          siteNumber,
+          label: `站点${siteNumber}`,
+          open: false,
+          remainingSeconds: 0,
+          openingDurationSeconds: 0,
+          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? 600,
+        }
+      );
+    }),
+  };
 }

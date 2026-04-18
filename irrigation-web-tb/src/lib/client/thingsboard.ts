@@ -787,14 +787,30 @@ async function sendRpc(
   method: string,
   params: Record<string, unknown>,
 ) {
-  await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
-    method: "POST",
-    body: JSON.stringify({
-      method,
-      params,
-      timeout: 20000,
-    }),
-  });
+  try {
+    await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        method,
+        params,
+        timeout: 20000,
+      }),
+    });
+  } catch (error) {
+    if (!isRpcConflictError(error)) {
+      throw error;
+    }
+    gatewayCache.delete(`${session.baseUrl}:${session.user.id}`);
+    await wait(1500);
+    await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        method,
+        params,
+        timeout: 20000,
+      }),
+    });
+  }
 }
 
 async function getLatestTelemetry(session: TbSession, deviceId: string, keys: string[]) {
@@ -1254,6 +1270,10 @@ function buildThingsBoardHttpError(status: number, path: string, rawBody: string
   }
   const tail = detail ? ` — ${detail}` : "";
   return new Error(`ThingsBoard 请求失败 ${status}: ${path}${tail}`);
+}
+
+function isRpcConflictError(error: unknown) {
+  return error instanceof Error && error.message.includes("ThingsBoard 拒绝 RPC（409");
 }
 
 function wait(ms: number) {

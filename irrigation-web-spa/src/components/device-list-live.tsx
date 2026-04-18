@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { fetchDeviceList, openTelemetrySocket } from "@/lib/client/thingsboard";
-import type { DeviceSummary } from "@/lib/domain/types";
+import { openTelemetrySocket, type TbWsMessage } from "@/lib/client/thingsboard";
+import type { ConnectivityState, DeviceSummary } from "@/lib/domain/types";
 
 type Props = {
   initialDevices: DeviceSummary[];
@@ -15,11 +15,11 @@ export function DeviceListLive({ initialDevices }: Props) {
     initialDevices.length > 0 ? "connecting" : "disconnected",
   );
   const [lastPushAt, setLastPushAt] = useState(0);
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const refreshInFlightRef = useRef(false);
+  const devicesRef = useRef(devices);
 
   useEffect(() => {
     setDevices(initialDevices);
+    devicesRef.current = initialDevices;
   }, [initialDevices]);
 
   useEffect(() => {
@@ -32,26 +32,18 @@ export function DeviceListLive({ initialDevices }: Props) {
     const ws = openTelemetrySocket(
       null,
       initialDevices.map((device) => device.id),
-      () => {
+      (message) => {
         if (disposed) {
           return;
         }
-        setLastPushAt(Date.now());
-        if (refreshTimerRef.current) {
-          clearTimeout(refreshTimerRef.current);
-        }
-        refreshTimerRef.current = setTimeout(() => {
-          if (disposed || refreshInFlightRef.current) {
-            return;
-          }
-          refreshInFlightRef.current = true;
-          void fetchDeviceList(null)
-            .then((items) => setDevices(items))
-            .catch(() => undefined)
-            .finally(() => {
-              refreshInFlightRef.current = false;
-            });
-        }, 800);
+        const now = Date.now();
+        setLastPushAt(now);
+        const nextDevices = devicesRef.current.map((device) => ({
+          ...device,
+          ...deriveDevicePatchFromWs(message, device, now),
+        }));
+        devicesRef.current = nextDevices;
+        setDevices(nextDevices);
       },
     );
 
@@ -75,9 +67,6 @@ export function DeviceListLive({ initialDevices }: Props) {
 
     return () => {
       disposed = true;
-      if (refreshTimerRef.current) {
-        clearTimeout(refreshTimerRef.current);
-      }
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
@@ -132,6 +121,87 @@ export function DeviceListLive({ initialDevices }: Props) {
       </section>
     </>
   );
+}
+
+function deriveDevicePatchFromWs(
+  message: TbWsMessage | undefined,
+  device: DeviceSummary,
+  fallbackTs: number,
+): Partial<DeviceSummary> {
+  const data = message?.data ?? {};
+  const bleConnectionState = latestWsValue(data.bleConnectionState);
+  const bleConnected = latestWsValue(data.bleConnected);
+  const batteryLevel = latestWsValue(data.batteryLevel);
+  const siteCount = latestWsValue(data.siteCount);
+  const selectedSiteNumber = latestWsValue(data.selectedSiteNumber);
+  const latestDataTs = Math.max(
+    0,
+    ...Object.values(data).map((entries) => entries[0]?.[0] ?? 0),
+  );
+  const nextTs = Math.max(device.lastSeenAt, device.platformLastActivityAt, latestDataTs, fallbackTs);
+
+  return {
+    platformState: "active",
+    platformLastActivityAt: nextTs,
+    lastSeenAt: nextTs,
+    connectivityState: normalizeConnectionStateFromWs(
+      bleConnectionState,
+      bleConnected,
+      device.connectivityState,
+    ),
+    batteryLevel: toNumberOrCurrent(batteryLevel, device.batteryLevel),
+    siteCount: clampInt(siteCount, 1, 8, device.siteCount),
+    selectedSiteNumber: clampInt(selectedSiteNumber, 1, 8, device.selectedSiteNumber),
+  };
+}
+
+function latestWsValue(entries?: Array<[number, unknown]>) {
+  return entries?.[0]?.[1];
+}
+
+function normalizeConnectionStateFromWs(
+  state: unknown,
+  connected: unknown,
+  current: ConnectivityState,
+): ConnectivityState {
+  if (
+    state === "connected" ||
+    state === "connecting" ||
+    state === "disconnected" ||
+    state === "error"
+  ) {
+    return state;
+  }
+  if (state === "idle") {
+    return "disconnected";
+  }
+  if (connected === true || connected === "true" || connected === 1 || connected === "1") {
+    return "connected";
+  }
+  if (connected === false || connected === "false" || connected === 0 || connected === "0") {
+    return "disconnected";
+  }
+  return current;
+}
+
+function toNumberOrCurrent(value: unknown, current: number) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value)) {
+    return Number(value);
+  }
+  return current;
+}
+
+function clampInt(value: unknown, min: number, max: number, current: number) {
+  const parsed =
+    typeof value === "number"
+      ? Math.trunc(value)
+      : typeof value === "string" && /^-?\d+$/.test(value)
+        ? Number.parseInt(value, 10)
+        : current;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function formatConnectionState(state: string) {
