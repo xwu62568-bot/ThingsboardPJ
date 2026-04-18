@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { DeviceConsole } from "@/components/device-console";
 import { LogoutButton } from "@/components/logout-button";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
@@ -16,7 +15,7 @@ import type { DeviceState, DeviceSummary } from "@/lib/domain/types";
 
 export function DevicePageClient() {
   const params = useParams<{ deviceId: string }>();
-  const router = useRouter();
+  const navigate = useNavigate();
   const [session] = useState<TbSession | null>(() => getStoredSession());
   const deviceId = String(params.deviceId);
   const [device, setDevice] = useState<DeviceState | null>(() =>
@@ -28,7 +27,7 @@ export function DevicePageClient() {
 
   useEffect(() => {
     if (!session) {
-      router.replace("/login");
+      navigate("/login", { replace: true });
       return;
     }
 
@@ -47,7 +46,7 @@ export function DevicePageClient() {
         setError(loadError instanceof Error ? loadError.message : "设备加载失败");
         setReady(true);
       });
-  }, [deviceId, router, session]);
+  }, [deviceId, navigate, session]);
 
   if (!ready) {
     return <main className="appPage">加载中...</main>;
@@ -65,7 +64,7 @@ export function DevicePageClient() {
     <main className="appPage">
       <header className="appHeader">
         <div className="headerLead">
-          <Link className="backLink" href="/devices">
+          <Link className="backLink" to="/devices">
             返回设备列表
           </Link>
           <div className="eyebrow">Irrigation Frontend</div>

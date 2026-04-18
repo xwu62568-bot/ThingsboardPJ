@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { DEFAULT_TB_BASE_URL, loginToThingsBoard } from "@/lib/client/thingsboard";
 import { getStoredSession, storeSession } from "@/lib/client/session";
 
@@ -11,7 +11,7 @@ const TB_BASE_URL_OPTIONS = [
 ];
 
 export function LoginForm() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [baseUrl, setBaseUrl] = useState(DEFAULT_TB_BASE_URL);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -20,9 +20,9 @@ export function LoginForm() {
 
   useEffect(() => {
     if (getStoredSession()) {
-      router.replace("/devices");
+      navigate("/devices", { replace: true });
     }
-  }, [router]);
+  }, [navigate]);
 
   const onSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -31,8 +31,7 @@ export function LoginForm() {
     try {
       const session = await loginToThingsBoard({ baseUrl, username, password });
       storeSession(session);
-      router.push("/devices");
-      router.refresh();
+      navigate("/devices", { replace: true });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "登录失败");
     } finally {

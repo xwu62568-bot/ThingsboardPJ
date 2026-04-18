@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { DeviceListLive } from "@/components/device-list-live";
 import { LogoutButton } from "@/components/logout-button";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
@@ -9,7 +9,7 @@ import { fetchDeviceList, getCachedDeviceList } from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 
 export function DevicesPageClient() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [session] = useState<TbSession | null>(() => getStoredSession());
   const [devices, setDevices] = useState<DeviceSummary[]>(() => getCachedDeviceList(session));
   const [ready, setReady] = useState(() => getCachedDeviceList(session).length > 0);
@@ -17,7 +17,7 @@ export function DevicesPageClient() {
 
   useEffect(() => {
     if (!session) {
-      router.replace("/login");
+      navigate("/login", { replace: true });
       return;
     }
 
@@ -31,7 +31,7 @@ export function DevicesPageClient() {
         setError(loadError instanceof Error ? loadError.message : "设备加载失败");
         setReady(true);
       });
-  }, [router, session]);
+  }, [navigate, session]);
 
   if (!ready) {
     return <main className="appPage">加载中...</main>;

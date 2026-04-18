@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { fetchDeviceList, openTelemetrySocket } from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 
@@ -94,7 +95,7 @@ export function DeviceListLive({ initialDevices }: Props) {
           <section className="errorBanner">当前没有可展示的设备。</section>
         ) : null}
         {devices.map((device) => (
-          <a key={device.id} className="deviceListCard" href={`/devices/${device.id}`}>
+          <Link key={device.id} className="deviceListCard" to={`/devices/${device.id}`}>
             <div className="deviceListCardHead">
               <div>
                 <div className="eyebrow">{device.model}</div>
@@ -126,7 +127,7 @@ export function DeviceListLive({ initialDevices }: Props) {
                 <strong>{device.batteryLevel}%</strong>
               </div>
             </dl>
-          </a>
+          </Link>
         ))}
       </section>
     </>

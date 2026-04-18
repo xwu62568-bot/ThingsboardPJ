@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   connectDevice,
   disconnectDevice,
@@ -195,10 +196,10 @@ export function DeviceConsole({
         <div className="panelTitle">设备清单</div>
         <div className="deviceRailList">
           {railDevices.map((item) => (
-            <a
+            <Link
               key={item.id}
               className={`deviceRailCard ${item.id === activeDeviceId ? "active" : ""}`}
-              href={`/devices/${item.id}`}
+              to={`/devices/${item.id}`}
             >
               <div>
                 <strong>{item.name}</strong>
@@ -207,7 +208,7 @@ export function DeviceConsole({
               <span className={`statusPill ${item.connectivityState}`}>
                 {formatConnectionState(item.connectivityState)}
               </span>
-            </a>
+            </Link>
           ))}
         </div>
       </aside>

@@ -7,7 +7,7 @@ import type {
 import { clearStoredSession, getStoredSession, type TbSession } from "./session";
 
 export const DEFAULT_TB_BASE_URL =
-  process.env.NEXT_PUBLIC_TB_BASE_URL?.trim() || "http://58.210.46.6:8888";
+  import.meta.env.VITE_TB_BASE_URL?.trim() || "http://58.210.46.6:8888";
 
 const CONTROL_REFRESH_DELAYS_MS = [1200, 2600];
 
@@ -124,8 +124,9 @@ function expireLocalSessionAndRedirect(reason?: string) {
     message: "会话已失效，请重新登录",
     detail: reason,
   });
-  if (typeof window !== "undefined" && window.location.pathname !== "/login") {
-    window.location.replace("/login");
+  if (typeof window !== "undefined" && window.location.hash !== "#/login") {
+    const base = `${window.location.pathname}${window.location.search}`;
+    window.location.replace(`${base}#/login`);
   }
 }
 
@@ -1024,8 +1025,8 @@ function isGatewayAttributes(attributes: Record<string, unknown>) {
 
 function parseDeviceMappings(): DeviceMapping[] {
   const raw =
-    process.env.NEXT_PUBLIC_TB_MANAGED_DEVICES?.trim() ||
-    process.env.NEXT_PUBLIC_TB_DEVICE_MAPPINGS?.trim();
+    import.meta.env.VITE_TB_MANAGED_DEVICES?.trim() ||
+    import.meta.env.VITE_TB_DEVICE_MAPPINGS?.trim();
   if (!raw) {
     return [];
   }
@@ -1033,7 +1034,7 @@ function parseDeviceMappings(): DeviceMapping[] {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as DeviceMapping[]) : [];
   } catch (error) {
-    console.error("[tb:auth] NEXT_PUBLIC_TB_MANAGED_DEVICES 解析失败", error);
+    console.error("[tb:auth] VITE_TB_MANAGED_DEVICES 解析失败", error);
     return [];
   }
 }

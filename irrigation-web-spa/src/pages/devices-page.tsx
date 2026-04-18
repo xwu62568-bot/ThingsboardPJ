@@ -1,5 +1,5 @@
 import { DevicesPageClient } from "@/components/devices-page-client";
 
-export default function DevicesPage() {
+export function DevicesPage() {
   return <DevicesPageClient />;
 }
