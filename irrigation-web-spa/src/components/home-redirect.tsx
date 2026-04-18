@@ -8,7 +8,7 @@ export function HomeRedirect() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    navigate(getStoredSession() ? "/devices" : "/login", { replace: true });
+    navigate(getStoredSession() ? "/dashboard" : "/login", { replace: true });
   }, [navigate]);
 
   return <main className="appPage">跳转中...</main>;

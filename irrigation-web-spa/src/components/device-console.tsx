@@ -278,7 +278,7 @@ export function DeviceConsole({
                 value={device.rpcTargetName || "--"}
               />
               <InfoRow
-                label="RPC 网关"
+                label="控制通道"
                 value={device.rpcGatewayName || device.rpcGatewayId || "自动发现中"}
               />
               <InfoRow label="RSSI" value={`${device.signalRssi} dBm`} />
@@ -367,7 +367,7 @@ export function DeviceConsole({
               <div>
                 <div className="panelTitle">传感与运行状态</div>
                 <p className="muted">
-                  浏览器直连 ThingsBoard WebSocket；遥测或属性变化时刷新界面。
+                  设备状态变化后会自动刷新，方便值守时持续观察。
                 </p>
               </div>
             </div>
@@ -386,7 +386,7 @@ export function DeviceConsole({
             <div className="panelHeader">
               <div>
                 <div className="panelTitle">站点实时状态</div>
-                <p className="muted">对应网关解析后的站点状态、剩余时长和开启累计时长。</p>
+                <p className="muted">查看每一路的当前状态、剩余时间和累计运行时长。</p>
               </div>
             </div>
             <div className="siteTable">

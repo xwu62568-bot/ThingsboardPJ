@@ -20,7 +20,7 @@ export function LoginForm() {
 
   useEffect(() => {
     if (getStoredSession()) {
-      navigate("/devices", { replace: true });
+      navigate("/dashboard", { replace: true });
     }
   }, [navigate]);
 
@@ -31,7 +31,7 @@ export function LoginForm() {
     try {
       const session = await loginToThingsBoard({ baseUrl, username, password });
       storeSession(session);
-      navigate("/devices", { replace: true });
+      navigate("/dashboard", { replace: true });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "登录失败");
     } finally {
@@ -44,14 +44,14 @@ export function LoginForm() {
       className="loginCard"
       onSubmit={onSubmit}
     >
-      <div className="eyebrow">Professional Irrigation Console</div>
+      <div className="eyebrow">Irrigation Console</div>
       <h1>登录灌溉前台</h1>
       <p className="muted">
-        前端直接连接 ThingsBoard：HTTP 直连加载数据，WebSocket 直连接收遥测与属性更新。
+        登录后可查看地块、设备、轮灌计划和自动策略。
       </p>
 
       <label className="field">
-        <span>ThingsBoard 地址</span>
+        <span>平台地址</span>
         <select
           name="baseUrl"
           value={baseUrl}
@@ -94,8 +94,8 @@ export function LoginForm() {
 
       <div className="credentialsCard">
         <strong>登录说明</strong>
-        <p>这里输入 ThingsBoard 的账号密码，浏览器会在本地保存当前会话。</p>
-        <p>地址支持下拉选择，已包含本地平台和 `https://thingsboard.cloud/`。</p>
+        <p>请输入你的平台账号和密码，浏览器会在本地保存当前登录状态。</p>
+        <p>地址支持下拉选择，也可以切换到不同部署环境。</p>
       </div>
     </form>
   );

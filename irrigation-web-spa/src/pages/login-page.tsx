@@ -4,11 +4,10 @@ export function LoginPage() {
   return (
     <main className="loginPage">
       <section className="loginShowcase">
-        <div className="eyebrow">ThingsBoard User App</div>
+        <div className="eyebrow">Smart Irrigation</div>
         <h2>专业灌溉前台</h2>
         <p>
-          首版聚焦设备状态、传感状态、连接控制、时长设置和手动开关阀，实时更新通道采用直连
-          ThingsBoard WebSocket。
+          面向现场管理和日常运维，集中查看地块、计划、自动策略与设备状态。
         </p>
       </section>
       <LoginForm />

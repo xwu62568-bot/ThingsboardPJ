@@ -1,92 +1,46 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
+import { useWorkspace } from "@/components/workspace-provider";
 import { DeviceListLive } from "@/components/device-list-live";
-import { LogoutButton } from "@/components/logout-button";
-import { getStoredSession, type TbSession } from "@/lib/client/session";
-import {
-  fetchDeviceList,
-  fetchDeviceListBasic,
-  getCachedDeviceList,
-  hasFullCachedDeviceList,
-} from "@/lib/client/thingsboard";
-import type { DeviceSummary } from "@/lib/domain/types";
 
 export function DevicesPageClient() {
-  const navigate = useNavigate();
-  const [session] = useState<TbSession | null>(() => getStoredSession());
-  const [devices, setDevices] = useState<DeviceSummary[]>(() => getCachedDeviceList(session));
-  const [ready, setReady] = useState(() => getCachedDeviceList(session).length > 0);
-  const [error, setError] = useState("");
+  const { devices, loading, refreshDevices } = useWorkspace();
 
-  useEffect(() => {
-    if (!session) {
-      navigate("/login", { replace: true });
-      return;
-    }
-    if (devices.length > 0) {
-      setReady(true);
-      if (hasFullCachedDeviceList(session)) {
-        return;
-      }
-      void fetchDeviceList(session)
-        .then((items) => {
-          setDevices(items);
-          setError("");
-        })
-        .catch((loadError) => {
-          setError(loadError instanceof Error ? loadError.message : "设备状态补全失败");
-      });
-      return;
-    }
-
-    void fetchDeviceListBasic(session)
-      .then((items) => {
-        setDevices(items);
-        setError("");
-        setReady(true);
-        return fetchDeviceList(session);
-      })
-      .then((items) => {
-        if (!items) {
-          return;
-        }
-        setDevices(items);
-        setError("");
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : "设备加载失败");
-        setReady(true);
-      });
-  }, [devices.length, navigate, session]);
-
-  if (!ready) {
-    return <main className="appPage">加载中...</main>;
+  if (loading && devices.length === 0) {
+    return <main className="workspacePage">加载设备中...</main>;
   }
 
   return (
-    <main className="appPage">
-      <header className="appHeader">
+    <main className="workspacePage">
+      <section className="sectionHead">
         <div>
-          <div className="eyebrow">Irrigation Frontend</div>
-          <strong>{session?.user.name ?? ""}</strong>
-          <p className="muted">{session?.user.role || "ThingsBoard User"}</p>
+          <h2>设备中心</h2>
         </div>
-        <LogoutButton />
-      </header>
-
-      <section className="devicesPageHeader">
-        <div>
-          <div className="eyebrow">ThingsBoard Devices</div>
-          <h1>设备列表</h1>
-          <p className="muted">
-            通过浏览器直连 ThingsBoard；列表由 HTTP 加载，TB WebSocket 推送变化时自动刷新。
-          </p>
+        <div className="headerActions">
+          <Link className="ghostButton" to="/fields">
+            去地块中心
+          </Link>
+          <button className="primaryButton" type="button" onClick={() => void refreshDevices()}>
+            刷新设备
+          </button>
         </div>
       </section>
 
-      {error ? <section className="errorBanner">{error}</section> : null}
+      <section className="devicePageIntro">
+        <article className="miniFeatureCard">
+          <strong>状态巡检</strong>
+          <p>快速查看设备在线状态、电量和最近活动时间。</p>
+        </article>
+        <article className="miniFeatureCard">
+          <strong>现场控制</strong>
+          <p>进入设备详情后可进行连接、刷新和手动开关阀。</p>
+        </article>
+        <article className="miniFeatureCard">
+          <strong>实时更新</strong>
+          <p>列表会自动刷新关键状态，适合日常运维和值守查看。</p>
+        </article>
+      </section>
       <DeviceListLive initialDevices={devices} />
     </main>
   );
