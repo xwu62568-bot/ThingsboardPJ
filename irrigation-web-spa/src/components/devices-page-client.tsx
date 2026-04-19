@@ -13,13 +13,10 @@ export function DevicesPageClient() {
 
   return (
     <main className="workspacePage">
-      <section className="sectionHead">
-        <div>
-          <h2>设备中心</h2>
-        </div>
+      <section className="pageToolbar">
         <div className="headerActions">
-          <Link className="ghostButton" to="/fields">
-            去地块中心
+          <Link className="ghostButton" to="/map">
+            去地块地图
           </Link>
           <button className="primaryButton" type="button" onClick={() => void refreshDevices()}>
             刷新设备

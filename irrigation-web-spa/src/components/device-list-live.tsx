@@ -334,13 +334,13 @@ function formatPlatformState(state: string) {
 function formatWsState(state: "connecting" | "connected" | "disconnected" | "error") {
   switch (state) {
     case "connected":
-      return "WS 已连接";
+      return "实时已连接";
     case "connecting":
-      return "WS 连接中";
+      return "实时连接中";
     case "error":
-      return "WS 异常";
+      return "实时异常";
     default:
-      return "WS 已断开";
+      return "实时已断开";
   }
 }
 

@@ -44,11 +44,8 @@ export function LoginForm() {
       className="loginCard"
       onSubmit={onSubmit}
     >
-      <div className="eyebrow">Irrigation Console</div>
-      <h1>登录灌溉前台</h1>
-      <p className="muted">
-        登录后可查看地块、设备、轮灌计划和自动策略。
-      </p>
+      <h1>登录</h1>
+      <p className="muted">使用平台账号进入工作台。</p>
 
       <label className="field">
         <span>平台地址</span>

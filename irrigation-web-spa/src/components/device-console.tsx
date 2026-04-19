@@ -232,7 +232,7 @@ export function DeviceConsole({
             <div className="panelHeader">
               <div>
                 <div className="panelTitle">连接控制</div>
-                <p className="muted">对应网关里的 connect / disconnect / refresh。</p>
+                <p className="muted">用于现场设备连接、断开和状态刷新。</p>
               </div>
             </div>
             <div className="actionRow">
@@ -468,13 +468,13 @@ function formatPlatformState(state: DeviceState["platformState"]) {
 function formatWsState(state: "connecting" | "connected" | "disconnected" | "error") {
   switch (state) {
     case "connected":
-      return "WS 已连接";
+      return "实时已连接";
     case "connecting":
-      return "WS 连接中";
+      return "实时连接中";
     case "error":
-      return "WS 异常";
+      return "实时异常";
     default:
-      return "WS 已断开";
+      return "实时已断开";
   }
 }
 

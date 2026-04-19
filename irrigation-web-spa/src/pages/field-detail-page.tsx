@@ -18,16 +18,13 @@ export function FieldDetailPage() {
   }, [field, session]);
 
   if (!detail) {
-    return <Navigate replace to="/fields" />;
+    return <Navigate replace to="/map" />;
   }
 
   return (
     <main className="workspacePage">
       <section className="detailHero">
         <div>
-          <Link className="backLink" to="/fields">
-            返回地块列表
-          </Link>
           <div className="eyebrow">{detail.code}</div>
           <h2>{detail.name}</h2>
           <p className="muted">
@@ -50,33 +47,31 @@ export function FieldDetailPage() {
         <article className="workspacePanel">
           <div className="sectionHead">
             <div>
-              <div className="eyebrow">ET Insight</div>
               <h3>蒸散与策略输入</h3>
             </div>
           </div>
           <div className="metricsRibbon">
             <div className="metricTile">
-              <span>ET0</span>
+              <span>标准蒸散</span>
               <strong>{detail.et0.toFixed(1)} mm</strong>
             </div>
             <div className="metricTile">
-              <span>Kc</span>
+              <span>作物系数</span>
               <strong>{detail.kc.toFixed(2)}</strong>
             </div>
             <div className="metricTile">
-              <span>ETc</span>
+              <span>作物蒸散</span>
               <strong>{detail.etc.toFixed(2)} mm</strong>
             </div>
           </div>
           <p className="muted">
-            结合 ET0、植物系数和 ETc，判断当前耗水水平并估算后续灌溉节奏。
+            结合标准蒸散、作物系数和作物蒸散，判断当前耗水水平并估算后续灌溉节奏。
           </p>
         </article>
 
         <article className="workspacePanel">
           <div className="sectionHead">
             <div>
-              <div className="eyebrow">Field Status</div>
               <h3>运行概况</h3>
             </div>
           </div>
@@ -100,7 +95,6 @@ export function FieldDetailPage() {
       <section className="workspacePanel">
         <div className="sectionHead">
           <div>
-            <div className="eyebrow">Zones</div>
             <h3>分区与站点</h3>
           </div>
           <Link className="inlineLink" to={`/devices/${detail.deviceId}`}>

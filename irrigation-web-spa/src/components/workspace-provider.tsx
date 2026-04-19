@@ -11,15 +11,18 @@ import {
 import { useNavigate } from "react-router-dom";
 import { getStoredSession, type TbSession } from "@/lib/client/session";
 import {
+  fetchFieldAssetRecords,
   fetchDeviceList,
   fetchDeviceListBasic,
   getCachedDeviceList,
   hasFullCachedDeviceList,
+  type TbFieldAssetRecord,
 } from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 import {
   buildDashboardSnapshot,
   buildFieldSummaries,
+  buildFieldSummariesFromRecords,
   buildPlanSummaries,
   buildStrategySummaries,
   type DashboardSnapshot,
@@ -38,6 +41,7 @@ type WorkspaceContextValue = {
   loading: boolean;
   error: string;
   refreshDevices: () => Promise<void>;
+  refreshWorkspace: () => Promise<void>;
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -46,6 +50,7 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
   const navigate = useNavigate();
   const [session] = useState<TbSession | null>(() => getStoredSession());
   const [devices, setDevices] = useState<DeviceSummary[]>(() => getCachedDeviceList(session));
+  const [fieldRecords, setFieldRecords] = useState<TbFieldAssetRecord[]>([]);
   const [loading, setLoading] = useState(() => getCachedDeviceList(session).length === 0);
   const [error, setError] = useState("");
 
@@ -67,15 +72,18 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
           }
           setDevices(basic);
         }
-        if (hasFullCachedDeviceList(session)) {
-          setLoading(false);
-          return;
-        }
-        const full = await fetchDeviceList(session);
+        const [full, fieldsFromTb] = await Promise.all([
+          hasFullCachedDeviceList(session) ? Promise.resolve(getCachedDeviceList(session)) : fetchDeviceList(session),
+          fetchFieldAssetRecords(session).catch((fieldError) => {
+            console.warn("[workspace] 地块资产读取失败，使用设备推导地块", fieldError);
+            return [];
+          }),
+        ]);
         if (disposed) {
           return;
         }
         setDevices(full);
+        setFieldRecords(fieldsFromTb);
         setError("");
       } catch (loadError) {
         if (!disposed) {
@@ -99,22 +107,37 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
       return null;
     }
     const fields = buildFieldSummaries(devices);
+    const tbFields =
+      fieldRecords.length > 0 ? buildFieldSummariesFromRecords(fieldRecords, devices) : fields;
     return {
       session,
       devices,
-      fields,
-      plans: buildPlanSummaries(fields),
-      strategies: buildStrategySummaries(fields),
-      dashboard: buildDashboardSnapshot(fields),
+      fields: tbFields,
+      plans: buildPlanSummaries(tbFields, fieldRecords),
+      strategies: buildStrategySummaries(tbFields, fieldRecords),
+      dashboard: buildDashboardSnapshot(tbFields),
       loading,
       error,
       refreshDevices: async () => {
-        const full = await fetchDeviceList(session);
+        const [full, fieldsFromTb] = await Promise.all([
+          fetchDeviceList(session),
+          fetchFieldAssetRecords(session).catch(() => []),
+        ]);
         setDevices(full);
+        setFieldRecords(fieldsFromTb);
+        setError("");
+      },
+      refreshWorkspace: async () => {
+        const [full, fieldsFromTb] = await Promise.all([
+          fetchDeviceList(session),
+          fetchFieldAssetRecords(session).catch(() => []),
+        ]);
+        setDevices(full);
+        setFieldRecords(fieldsFromTb);
         setError("");
       },
     };
-  }, [devices, error, loading, session]);
+  }, [devices, error, fieldRecords, loading, session]);
 
   if (!value) {
     return <main className="appPage">会话检查中...</main>;

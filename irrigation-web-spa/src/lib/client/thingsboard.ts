@@ -62,6 +62,37 @@ const SHARED_ATTRIBUTE_KEYS = [
   "targetDeviceName",
 ];
 
+const FIELD_ASSET_TYPE = "Field";
+const FIELD_ATTRIBUTE_KEYS = [
+  "code",
+  "groupName",
+  "cropType",
+  "growthStage",
+  "areaMu",
+  "centerLat",
+  "centerLng",
+  "boundary",
+  "zones",
+  "deviceId",
+  "deviceMarkers",
+  "zoneCount",
+  "kc",
+  "irrigationEfficiency",
+  "rotationPlans",
+  "automationStrategies",
+];
+const FIELD_TELEMETRY_KEYS = [
+  "soilMoisture",
+  "batteryLevel",
+  "gatewayState",
+  "irrigationState",
+  "et0",
+  "kc",
+  "etc",
+  "rainfallForecastMm",
+  "suggestedDurationMinutes",
+];
+
 const configuredDeviceMappings = parseDeviceMappings();
 const gatewayCache = new Map<string, { id: string; name: string; expiresAt: number }>();
 const unsupportedDeviceInfosBaseUrls = new Set<string>();
@@ -83,6 +114,87 @@ type DeviceMapping = {
   model?: string;
   serialNumber?: string;
   siteCount?: number;
+};
+
+export type TbEntityType = "ASSET" | "DEVICE";
+
+export type TbEntityRef = {
+  entityType: TbEntityType;
+  id: string;
+};
+
+export type TbFieldAssetConfig = {
+  code?: string;
+  groupName?: string;
+  cropType?: string;
+  growthStage?: string;
+  areaMu?: number;
+  centerLat?: number;
+  centerLng?: number;
+  boundary?: Array<[number, number]>;
+  zones?: Array<{
+    id: string;
+    name: string;
+    siteNumber: number;
+    boundary: Array<[number, number]>;
+    deviceId?: string;
+    deviceIds?: string[];
+    deviceBindings?: Array<{
+      deviceId: string;
+      siteNumber?: number;
+    }>;
+    valveSiteNumber?: number;
+  }>;
+  deviceId?: string;
+  deviceMarkers?: Array<{
+    deviceId: string;
+    name: string;
+    role: string;
+    lng: number;
+    lat: number;
+    zoneId?: string;
+    siteNumber?: number;
+  }>;
+  zoneCount?: number;
+  kc?: number;
+  irrigationEfficiency?: number;
+  rotationPlans?: unknown[];
+  automationStrategies?: unknown[];
+};
+
+export type TbFieldAssetRecord = {
+  id: string;
+  name: string;
+  label?: string;
+  type: string;
+  config: TbFieldAssetConfig;
+  telemetry: Record<string, unknown>;
+};
+
+export type TbRotationPlanConfig = {
+  id: string;
+  name: string;
+  fieldId: string;
+  startAt: string;
+  enabled: boolean;
+  skipIfRain: boolean;
+  mode: "manual" | "semi-auto" | "auto";
+  zones: Array<{
+    siteNumber: number;
+    durationMinutes: number;
+  }>;
+};
+
+export type TbAutomationStrategyConfig = {
+  id: string;
+  name: string;
+  fieldId: string;
+  enabled: boolean;
+  moistureMin: number;
+  moistureRecover: number;
+  etcTriggerMm: number;
+  rainLockEnabled: boolean;
+  mode: "advisory" | "semi-auto" | "auto";
 };
 
 export type TbDebugEntry = {
@@ -282,6 +394,94 @@ export function hasFullCachedDeviceList(session?: TbSession | null): boolean {
   } catch {
     return false;
   }
+}
+
+export async function fetchFieldAssetRecords(
+  session?: TbSession | null,
+): Promise<TbFieldAssetRecord[]> {
+  const resolved = resolveRequiredSession(session);
+  const rows = await fetchAccessibleAssetRows(resolved, FIELD_ASSET_TYPE);
+  return mapWithConcurrency(rows, 4, async (raw) => {
+    const item = (raw ?? {}) as Record<string, unknown>;
+    const assetId = extractEntityId(item.id);
+    const [attributes, telemetry] = assetId
+      ? await Promise.all([
+          getEntityAttributes(resolved, { entityType: "ASSET", id: assetId }, "SERVER_SCOPE", FIELD_ATTRIBUTE_KEYS),
+          getEntityLatestTelemetry(resolved, { entityType: "ASSET", id: assetId }, FIELD_TELEMETRY_KEYS),
+        ])
+      : [{}, {}];
+
+    return {
+      id: assetId ?? "",
+      name: typeof item.name === "string" ? item.name : "未命名地块",
+      label: typeof item.label === "string" ? item.label : undefined,
+      type: typeof item.type === "string" ? item.type : FIELD_ASSET_TYPE,
+      config: mapFieldAssetConfig(attributes),
+      telemetry,
+    };
+  });
+}
+
+export async function saveFieldAssetRecord(input: {
+  session?: TbSession | null;
+  id?: string;
+  name: string;
+  label?: string;
+  config: TbFieldAssetConfig;
+}): Promise<TbFieldAssetRecord> {
+  const resolved = resolveRequiredSession(input.session);
+  const payload = {
+    ...(input.id
+      ? {
+          id: {
+            entityType: "ASSET",
+            id: input.id,
+          },
+        }
+      : {}),
+    name: input.name,
+    label: input.label,
+    type: FIELD_ASSET_TYPE,
+  };
+  const saved = (await tbRequest(resolved, "/api/asset", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })) as Record<string, unknown>;
+  const assetId = extractEntityId(saved.id) ?? input.id;
+  if (!assetId) {
+    throw new Error("ThingsBoard 未返回地块 Asset ID");
+  }
+  await saveEntityAttributes(resolved, { entityType: "ASSET", id: assetId }, input.config);
+  return {
+    id: assetId,
+    name: typeof saved.name === "string" ? saved.name : input.name,
+    label: typeof saved.label === "string" ? saved.label : input.label,
+    type: typeof saved.type === "string" ? saved.type : FIELD_ASSET_TYPE,
+    config: input.config,
+    telemetry: {},
+  };
+}
+
+export async function saveFieldRotationPlans(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  plans: TbRotationPlanConfig[];
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
+    rotationPlans: input.plans,
+  });
+}
+
+export async function saveFieldAutomationStrategies(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  strategies: TbAutomationStrategyConfig[];
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
+    automationStrategies: input.strategies,
+  });
 }
 
 async function mapToDeviceSummary(
@@ -865,6 +1065,72 @@ async function fetchAccessibleDeviceRows(session: TbSession) {
   }
 }
 
+async function fetchAccessibleAssetRows(session: TbSession, assetType: string) {
+  const liveUser = await fetchCurrentUser(session.baseUrl, session.token);
+  const effectiveUser = mergeSessionUser(session.user, liveUser);
+
+  if (canUseCustomerScope(effectiveUser)) {
+    const customerId =
+      extractEntityId(effectiveUser?.customerId) ??
+      (await resolveCustomerId(session.baseUrl, session.token, session.user));
+    if (!customerId) {
+      throw new Error("ThingsBoard 当前账号缺少 customerId，无法查询客户资产列表");
+    }
+    return fetchCustomerAssetRows(session, customerId, assetType);
+  }
+
+  try {
+    return await fetchTenantAssetRows(session, assetType);
+  } catch (error) {
+    const customerId = extractEntityId(effectiveUser?.customerId);
+    if (canUseCustomerScope(effectiveUser) && customerId) {
+      return fetchCustomerAssetRows(session, customerId, assetType);
+    }
+    throw error;
+  }
+}
+
+async function fetchTenantAssetRows(session: TbSession, assetType: string) {
+  return fetchAssetRowsWithFallback(session, [
+    `/api/tenant/assets?pageSize=100&page=0&type=${encodeURIComponent(assetType)}`,
+    `/api/tenant/assets?pageSize=100&page=0&assetType=${encodeURIComponent(assetType)}`,
+  ]);
+}
+
+async function fetchCustomerAssetRows(session: TbSession, customerId: string, assetType: string) {
+  return fetchAssetRowsWithFallback(session, [
+    `/api/customer/${customerId}/assets?pageSize=100&page=0&type=${encodeURIComponent(assetType)}`,
+    `/api/customer/${customerId}/assets?pageSize=100&page=0&assetType=${encodeURIComponent(assetType)}`,
+  ]);
+}
+
+async function fetchAssetRowsWithFallback(session: TbSession, paths: string[]) {
+  let lastError: unknown;
+  let emptyRows: unknown[] = [];
+  let sawEmptyResponse = false;
+  for (const path of paths) {
+    try {
+      const data = await tbRequest(session, path);
+      const rows = Array.isArray(data)
+        ? data
+        : Array.isArray((data as { data?: unknown[] } | null)?.data)
+          ? ((data as { data?: unknown[] }).data ?? [])
+          : [];
+      if (rows.length > 0) {
+        return rows;
+      }
+      emptyRows = rows;
+      sawEmptyResponse = true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (sawEmptyResponse) {
+    return emptyRows;
+  }
+  throw lastError instanceof Error ? lastError : new Error("ThingsBoard 资产列表查询失败");
+}
+
 async function fetchTenantDeviceRows(session: TbSession) {
   if (
     !supportsDeviceInfos(session.baseUrl) ||
@@ -1148,13 +1414,21 @@ async function sendRpc(
 }
 
 async function getLatestTelemetry(session: TbSession, deviceId: string, keys: string[]) {
+  return getEntityLatestTelemetry(session, { entityType: "DEVICE", id: deviceId }, keys);
+}
+
+async function getEntityLatestTelemetry(
+  session: TbSession,
+  entity: TbEntityRef,
+  keys: string[],
+) {
   const query = new URLSearchParams({
     keys: keys.join(","),
     useStrictDataTypes: "true",
   });
   const payload = (await tbRequest(
     session,
-    `/api/plugins/telemetry/DEVICE/${deviceId}/values/timeseries?${query.toString()}`,
+    `/api/plugins/telemetry/${entity.entityType}/${entity.id}/values/timeseries?${query.toString()}`,
   )) as Record<string, Array<{ value?: unknown; ts?: number }>>;
   const values: Record<string, unknown> = {};
   for (const [key, entries] of Object.entries(payload ?? {})) {
@@ -1172,12 +1446,21 @@ async function getAttributes(
   scope: "CLIENT_SCOPE" | "SHARED_SCOPE",
   keys: string[],
 ) {
+  return getEntityAttributes(session, { entityType: "DEVICE", id: deviceId }, scope, keys);
+}
+
+async function getEntityAttributes(
+  session: TbSession,
+  entity: TbEntityRef,
+  scope: "CLIENT_SCOPE" | "SHARED_SCOPE" | "SERVER_SCOPE",
+  keys: string[],
+) {
   const query = new URLSearchParams({
     keys: keys.join(","),
   });
   const payload = (await tbRequest(
     session,
-    `/api/plugins/telemetry/DEVICE/${deviceId}/values/attributes/${scope}?${query.toString()}`,
+    `/api/plugins/telemetry/${entity.entityType}/${entity.id}/values/attributes/${scope}?${query.toString()}`,
   )) as Array<{ key?: string; value?: unknown; lastUpdateTs?: number }>;
   const values: Record<string, unknown> = {};
   for (const item of Array.isArray(payload) ? payload : []) {
@@ -1188,6 +1471,17 @@ async function getAttributes(
     values[`${item.key}Ts`] = item.lastUpdateTs ?? 0;
   }
   return values;
+}
+
+async function saveEntityAttributes(
+  session: TbSession,
+  entity: TbEntityRef,
+  attributes: Record<string, unknown>,
+) {
+  await tbRequest(session, `/api/plugins/telemetry/${entity.entityType}/${entity.id}/SERVER_SCOPE`, {
+    method: "POST",
+    body: JSON.stringify(compactRecord(attributes)),
+  });
 }
 
 async function tbRequest(session: TbSession, path: string, init: RequestInit = {}) {
@@ -1546,6 +1840,122 @@ function findDeviceMapping(input: { id?: string; name?: string }) {
     }
   }
   return null;
+}
+
+function mapFieldAssetConfig(attributes: Record<string, unknown>): TbFieldAssetConfig {
+  return {
+    code: toStringValue(attributes.code),
+    groupName: toStringValue(attributes.groupName),
+    cropType: toStringValue(attributes.cropType),
+    growthStage: toStringValue(attributes.growthStage),
+    areaMu: toNumber(attributes.areaMu) ?? undefined,
+    centerLat: toNumber(attributes.centerLat) ?? undefined,
+    centerLng: toNumber(attributes.centerLng) ?? undefined,
+    boundary: normalizeBoundaryAttribute(attributes.boundary),
+    zones: normalizeZonesAttribute(attributes.zones),
+    deviceId: toStringValue(attributes.deviceId),
+    deviceMarkers: normalizeDeviceMarkersAttribute(attributes.deviceMarkers),
+    zoneCount: toInt(attributes.zoneCount) ?? undefined,
+    kc: toNumber(attributes.kc) ?? undefined,
+    irrigationEfficiency: toNumber(attributes.irrigationEfficiency) ?? undefined,
+    rotationPlans: Array.isArray(attributes.rotationPlans) ? attributes.rotationPlans : undefined,
+    automationStrategies: Array.isArray(attributes.automationStrategies)
+      ? attributes.automationStrategies
+      : undefined,
+  };
+}
+
+function compactRecord<T extends Record<string, unknown>>(input: T) {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
+}
+
+function normalizeBoundaryAttribute(value: unknown): Array<[number, number]> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const points = value
+    .map((point) => {
+      if (!Array.isArray(point) || point.length < 2) {
+        return null;
+      }
+      const lng = toNumber(point[0]);
+      const lat = toNumber(point[1]);
+      return lng === null || lat === null ? null : ([lng, lat] as [number, number]);
+    })
+    .filter((point): point is [number, number] => Boolean(point));
+  return points.length >= 3 ? points : undefined;
+}
+
+function normalizeZonesAttribute(value: unknown): TbFieldAssetConfig["zones"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const zones = value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item, index) => {
+      const boundary = normalizeBoundaryAttribute(item.boundary);
+      if (!boundary) {
+        return null;
+      }
+      return {
+        id: toStringValue(item.id) ?? `zone-${index + 1}`,
+        name: toStringValue(item.name) ?? `${index + 1}区`,
+        siteNumber: toInt(item.siteNumber) ?? index + 1,
+        boundary,
+        deviceId: toStringValue(item.deviceId),
+        deviceIds: Array.isArray(item.deviceIds)
+          ? item.deviceIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+          : undefined,
+        deviceBindings: Array.isArray(item.deviceBindings)
+          ? item.deviceBindings
+              .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+              .flatMap((entry) => {
+                const deviceId = toStringValue(entry.deviceId);
+                if (!deviceId) {
+                  return [];
+                }
+                const siteNumber = toInt(entry.siteNumber) ?? undefined;
+                return siteNumber ? [{ deviceId, siteNumber }] : [{ deviceId }];
+              })
+          : undefined,
+        valveSiteNumber: toInt(item.valveSiteNumber) ?? index + 1,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  return zones.length > 0 ? zones : undefined;
+}
+
+function normalizeDeviceMarkersAttribute(value: unknown): TbFieldAssetConfig["deviceMarkers"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const markers = value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => {
+      const deviceId = toStringValue(item.deviceId);
+      const lng = toNumber(item.lng);
+      const lat = toNumber(item.lat);
+      if (!deviceId || lng === null || lat === null) {
+        return null;
+      }
+      return {
+        deviceId,
+        name: toStringValue(item.name) ?? "现场设备",
+        role: toStringValue(item.role) ?? "controller",
+        lng,
+        lat,
+        zoneId: toStringValue(item.zoneId),
+        siteNumber: toInt(item.siteNumber) ?? undefined,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  return markers.length > 0 ? markers : undefined;
+}
+
+function toStringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function normalizeMaybeTypedValue(value: unknown) {

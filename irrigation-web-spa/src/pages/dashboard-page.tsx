@@ -7,35 +7,18 @@ export function DashboardPage() {
 
   return (
     <main className="workspacePage">
-      <section className="operationsBar">
-        <div>
-          <div className="eyebrow">Today</div>
-          <h2>今日概况</h2>
-        </div>
-        <div className="heroActions">
-          <Link className="primaryButton" to="/fields">
-            地块管理
-          </Link>
-          <Link className="ghostButton" to="/plans">
-            轮灌计划
-          </Link>
-        </div>
-      </section>
-
       <section className="statsGrid">
         <StatCard label="地块数" value={dashboard.totalFields} />
         <StatCard label="在线设备" value={dashboard.onlineDevices} />
         <StatCard label="灌溉中" value={dashboard.runningZones} />
-        <StatCard label="平均电量" value={`${dashboard.averageBatteryLevel.toFixed(0)}%`} />
-        <StatCard label="平均 ET0" value={`${dashboard.averageEt0.toFixed(1)} mm`} />
-        <StatCard label="平均 ETc" value={`${dashboard.averageEtc.toFixed(1)} mm`} />
+        <StatCard label="标准蒸散" value={`${dashboard.averageEt0.toFixed(1)} mm`} />
+        <StatCard label="作物蒸散" value={`${dashboard.averageEtc.toFixed(1)} mm`} />
       </section>
 
       <section className="twoColumnGrid">
         <article className="workspacePanel">
           <div className="sectionHead">
             <div>
-              <div className="eyebrow">Field Focus</div>
               <h3>重点地块</h3>
             </div>
             <Link className="inlineLink" to="/map">
@@ -53,7 +36,7 @@ export function DashboardPage() {
                 </div>
                 <div className="fieldStripMetrics">
                   <span>{field.soilMoisture}% 湿度</span>
-                  <span>{field.etc.toFixed(2)} ETc</span>
+                  <span>作物蒸散 {field.etc.toFixed(2)}</span>
                 </div>
               </Link>
             ))}
@@ -63,7 +46,6 @@ export function DashboardPage() {
         <article className="workspacePanel">
           <div className="sectionHead">
             <div>
-              <div className="eyebrow">Automation</div>
               <h3>今日执行建议</h3>
             </div>
           </div>
@@ -80,7 +62,7 @@ export function DashboardPage() {
               <div className="summaryCard" key={strategy.id}>
                 <strong>{strategy.name}</strong>
                 <p>
-                  触发 ETc {strategy.etcTriggerMm.toFixed(1)} mm · 墒情下限 {strategy.moistureMin}%
+                  触发作物蒸散 {strategy.etcTriggerMm.toFixed(1)} mm · 墒情下限 {strategy.moistureMin}%
                 </p>
               </div>
             ))}

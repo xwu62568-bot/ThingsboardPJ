@@ -52,7 +52,7 @@ export function DevicePageClient() {
           <Link className="backLink" to="/devices">
             返回设备列表
           </Link>
-          <div className="eyebrow">Device Detail</div>
+          <div className="eyebrow">设备详情</div>
           <h2>{device.name}</h2>
         </div>
         <div className="headerActions">
