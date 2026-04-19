@@ -58,6 +58,9 @@ export type IrrigationPlanSummary = {
   name: string;
   fieldId: string;
   fieldName: string;
+  scheduleType: "daily" | "weekly" | "interval";
+  weekdays: number[];
+  intervalDays: number;
   startAt: string;
   enabled: boolean;
   skipIfRain: boolean;
@@ -65,8 +68,14 @@ export type IrrigationPlanSummary = {
   totalDurationMinutes: number;
   mode: "manual" | "semi-auto" | "auto";
   zones: Array<{
+    zoneId?: string;
+    zoneName?: string;
     siteNumber: number;
+    deviceId?: string;
+    deviceName?: string;
+    order?: number;
     durationMinutes: number;
+    enabled?: boolean;
   }>;
 };
 
@@ -75,10 +84,22 @@ export type StrategySummary = {
   name: string;
   fieldId: string;
   fieldName: string;
+  type: "threshold" | "quota" | "etc";
   enabled: boolean;
+  scope: "field" | "zones";
+  zoneIds: string[];
   moistureMin: number;
   moistureRecover: number;
   etcTriggerMm: number;
+  targetWaterMm: number;
+  targetWaterM3PerMu: number;
+  flowRateM3h: number;
+  irrigationEfficiency: number;
+  effectiveRainfallRatio: number;
+  replenishRatio: number;
+  minIntervalHours: number;
+  maxDurationMinutes: number;
+  splitRounds: boolean;
   rainLockEnabled: boolean;
   mode: "advisory" | "semi-auto" | "auto";
 };
@@ -249,26 +270,7 @@ export function buildPlanSummaries(
     return configuredPlans;
   }
 
-  return fields.map((field, index) => {
-    const zoneDuration = 12 + ((index % 3) + 1) * 4;
-    const zones = Array.from({ length: field.zoneCount }, (_, zoneIndex) => ({
-      siteNumber: zoneIndex + 1,
-      durationMinutes: zoneDuration,
-    }));
-    return {
-      id: `plan-${field.id}`,
-      name: `${field.name} 晨间轮灌`,
-      fieldId: field.id,
-      fieldName: field.name,
-      startAt: index % 2 === 0 ? "05:30" : "18:10",
-      enabled: true,
-      skipIfRain: true,
-      zoneCount: field.zoneCount,
-      totalDurationMinutes: sumPlanDuration(zones),
-      mode: index % 3 === 0 ? "auto" : index % 2 === 0 ? "semi-auto" : "manual",
-      zones,
-    };
-  });
+  return [];
 }
 
 export function buildStrategySummaries(
@@ -285,18 +287,7 @@ export function buildStrategySummaries(
     return configuredStrategies;
   }
 
-  return fields.map((field, index) => ({
-    id: `strategy-${field.id}`,
-    name: `${field.name} 墒情联动策略`,
-    fieldId: field.id,
-    fieldName: field.name,
-    enabled: true,
-    moistureMin: 28 + (index % 3) * 2,
-    moistureRecover: 36 + (index % 4) * 2,
-    etcTriggerMm: Number((3.6 + (index % 4) * 0.8).toFixed(1)),
-    rainLockEnabled: true,
-    mode: index % 3 === 0 ? "auto" : index % 2 === 0 ? "semi-auto" : "advisory",
-  }));
+  return [];
 }
 
 function formatFieldName(name: string) {
@@ -345,14 +336,26 @@ function normalizeRotationPlans(value: unknown): TbRotationPlanConfig[] {
               return typeof zone === "object" && zone !== null && !Array.isArray(zone);
             })
             .map((zone, zoneIndex) => ({
+              zoneId: typeof zone.zoneId === "string" ? zone.zoneId : undefined,
+              zoneName: typeof zone.zoneName === "string" ? zone.zoneName : undefined,
               siteNumber: toNumber(zone.siteNumber) ?? zoneIndex + 1,
+              deviceId: typeof zone.deviceId === "string" ? zone.deviceId : undefined,
+              deviceName: typeof zone.deviceName === "string" ? zone.deviceName : undefined,
+              order: toNumber(zone.order) ?? zoneIndex + 1,
               durationMinutes: toNumber(zone.durationMinutes) ?? 10,
+              enabled: typeof zone.enabled === "boolean" ? zone.enabled : true,
             }))
         : [];
       return {
         id: typeof item.id === "string" && item.id ? item.id : `plan-${index + 1}`,
         name: typeof item.name === "string" && item.name ? item.name : `轮灌计划${index + 1}`,
         fieldId: typeof item.fieldId === "string" ? item.fieldId : "",
+        scheduleType:
+          item.scheduleType === "weekly" || item.scheduleType === "interval" ? item.scheduleType : "daily",
+        weekdays: Array.isArray(item.weekdays)
+          ? item.weekdays.map((weekday) => toNumber(weekday)).filter((weekday): weekday is number => typeof weekday === "number")
+          : [],
+        intervalDays: toNumber(item.intervalDays) ?? 1,
         startAt: typeof item.startAt === "string" ? item.startAt : "05:30",
         enabled: typeof item.enabled === "boolean" ? item.enabled : true,
         skipIfRain: typeof item.skipIfRain === "boolean" ? item.skipIfRain : true,
@@ -384,6 +387,9 @@ function mapRotationPlanToSummary(
     name: plan.name,
     fieldId: plan.fieldId || fieldId,
     fieldName,
+    scheduleType: plan.scheduleType ?? "daily",
+    weekdays: plan.weekdays ?? [],
+    intervalDays: plan.intervalDays ?? 1,
     startAt: plan.startAt,
     enabled: plan.enabled,
     skipIfRain: plan.skipIfRain,
@@ -410,10 +416,27 @@ function normalizeAutomationStrategies(value: unknown): TbAutomationStrategyConf
       id: typeof item.id === "string" && item.id ? item.id : `strategy-${index + 1}`,
       name: typeof item.name === "string" && item.name ? item.name : `自动策略${index + 1}`,
       fieldId: typeof item.fieldId === "string" ? item.fieldId : "",
+      type:
+        item.type === "quota" || item.type === "etc" || item.type === "threshold"
+          ? item.type
+          : "threshold",
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
+      scope: item.scope === "zones" ? "zones" : "field",
+      zoneIds: Array.isArray(item.zoneIds)
+        ? item.zoneIds.filter((zoneId): zoneId is string => typeof zoneId === "string" && zoneId.length > 0)
+        : [],
       moistureMin: toNumber(item.moistureMin) ?? 28,
       moistureRecover: toNumber(item.moistureRecover) ?? 36,
       etcTriggerMm: toNumber(item.etcTriggerMm) ?? 4,
+      targetWaterMm: toNumber(item.targetWaterMm) ?? 8,
+      targetWaterM3PerMu: toNumber(item.targetWaterM3PerMu) ?? 5,
+      flowRateM3h: toNumber(item.flowRateM3h) ?? 2,
+      irrigationEfficiency: toNumber(item.irrigationEfficiency) ?? 0.85,
+      effectiveRainfallRatio: toNumber(item.effectiveRainfallRatio) ?? 0.7,
+      replenishRatio: toNumber(item.replenishRatio) ?? 0.8,
+      minIntervalHours: toNumber(item.minIntervalHours) ?? 12,
+      maxDurationMinutes: toNumber(item.maxDurationMinutes) ?? 60,
+      splitRounds: typeof item.splitRounds === "boolean" ? item.splitRounds : true,
       rainLockEnabled: typeof item.rainLockEnabled === "boolean" ? item.rainLockEnabled : true,
       mode:
         item.mode === "advisory" || item.mode === "semi-auto" || item.mode === "auto"
@@ -433,10 +456,22 @@ function mapAutomationStrategyToSummary(
     name: strategy.name,
     fieldId: strategy.fieldId || fieldId,
     fieldName,
+    type: strategy.type ?? "threshold",
     enabled: strategy.enabled,
+    scope: strategy.scope ?? "field",
+    zoneIds: strategy.zoneIds ?? [],
     moistureMin: strategy.moistureMin,
     moistureRecover: strategy.moistureRecover,
     etcTriggerMm: strategy.etcTriggerMm,
+    targetWaterMm: strategy.targetWaterMm ?? 8,
+    targetWaterM3PerMu: strategy.targetWaterM3PerMu ?? 5,
+    flowRateM3h: strategy.flowRateM3h ?? 2,
+    irrigationEfficiency: strategy.irrigationEfficiency ?? 0.85,
+    effectiveRainfallRatio: strategy.effectiveRainfallRatio ?? 0.7,
+    replenishRatio: strategy.replenishRatio ?? 0.8,
+    minIntervalHours: strategy.minIntervalHours ?? 12,
+    maxDurationMinutes: strategy.maxDurationMinutes ?? 60,
+    splitRounds: strategy.splitRounds ?? true,
     rainLockEnabled: strategy.rainLockEnabled,
     mode: strategy.mode,
   };

@@ -22,7 +22,11 @@ export function App() {
         <Route path="/fields" element={<Navigate to="/map" replace />} />
         <Route path="/fields/:fieldId" element={<FieldDetailPage />} />
         <Route path="/plans" element={<PlansPage />} />
+        <Route path="/plans/new" element={<PlansPage />} />
+        <Route path="/plans/:planId" element={<PlansPage />} />
         <Route path="/strategies" element={<StrategiesPage />} />
+        <Route path="/strategies/new" element={<StrategiesPage />} />
+        <Route path="/strategies/:strategyId" element={<StrategiesPage />} />
         <Route path="/devices" element={<DevicesPage />} />
         <Route path="/devices/:deviceId" element={<DevicePage />} />
         <Route path="/account" element={<AccountPage />} />

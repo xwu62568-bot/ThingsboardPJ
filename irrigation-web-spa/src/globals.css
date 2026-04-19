@@ -205,6 +205,16 @@ select {
   border-color: #c4c4cc;
 }
 
+.dangerButton {
+  color: var(--danger);
+  border-color: rgba(185, 28, 28, 0.24);
+}
+
+.dangerButton:hover {
+  background: #fef2f2;
+  border-color: rgba(185, 28, 28, 0.42);
+}
+
 .loadingBanner,
 .errorMessage,
 .errorBanner {
@@ -737,6 +747,225 @@ select {
   opacity: 0.35;
 }
 
+.dashboardCockpit {
+  gap: 16px;
+}
+
+.decisionPanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.95fr);
+  gap: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 22px;
+  background:
+    radial-gradient(circle at 12% 10%, rgba(16, 185, 129, 0.18), transparent 32%),
+    linear-gradient(135deg, #f8faf9 0%, #eef7f2 100%);
+  box-shadow: var(--shadow-sm);
+}
+
+.decisionPanel h2 {
+  margin: 6px 0 8px;
+  color: var(--text);
+  font-size: clamp(1.45rem, 3vw, 2.15rem);
+  letter-spacing: -0.04em;
+}
+
+.decisionPanel p {
+  max-width: 680px;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.decisionPanel--warn {
+  background:
+    radial-gradient(circle at 12% 10%, rgba(245, 158, 11, 0.2), transparent 32%),
+    linear-gradient(135deg, #fffaf0 0%, #f7f1e7 100%);
+}
+
+.decisionPanel--calm {
+  background:
+    radial-gradient(circle at 12% 10%, rgba(20, 184, 166, 0.16), transparent 32%),
+    linear-gradient(135deg, #f8faf9 0%, #edf6f5 100%);
+}
+
+.decisionMetrics,
+.waterBalanceRows,
+.strategyStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metricBlock {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(24, 24, 27, 0.08);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.metricBlock span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.metricBlock strong {
+  color: var(--text);
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.dashboardGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 14px;
+}
+
+.scheduleItem,
+.riskItem {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: var(--bg-elevated);
+  color: inherit;
+  text-decoration: none;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+.scheduleItem {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.scheduleItem:hover,
+.riskItem:hover {
+  border-color: rgba(var(--accent-rgb), 0.36);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.scheduleItem p,
+.riskItem p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.scheduleItem > div:last-child {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.scheduleItem em,
+.riskMetrics em {
+  color: var(--text);
+  font-style: normal;
+}
+
+.riskItem {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.riskBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 800;
+}
+
+.riskBadge--高 {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.riskBadge--中 {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.riskBadge--低 {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.riskMetrics {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.waterBalancePanel {
+  background:
+    radial-gradient(circle at 92% 12%, rgba(14, 165, 233, 0.14), transparent 30%),
+    var(--bg-elevated);
+}
+
+.waterBalanceHero {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(14, 165, 233, 0.2);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  background: #f0f9ff;
+}
+
+.waterBalanceHero span {
+  color: #0369a1;
+  font-size: 0.8125rem;
+  font-weight: 800;
+}
+
+.waterBalanceHero strong {
+  color: #075985;
+  font-size: 2rem;
+  letter-spacing: -0.05em;
+}
+
+.waterBalanceHero p {
+  margin: 0;
+  color: #0c4a6e;
+  line-height: 1.6;
+}
+
+.emptyHint {
+  display: grid;
+  gap: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  background: var(--bg-muted);
+}
+
+.emptyHint p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.strategySummaryLink {
+  color: inherit;
+  text-decoration: none;
+}
+
 .statCard span {
   font-size: 0.75rem;
   font-weight: 600;
@@ -1262,6 +1491,67 @@ select {
   gap: 5px;
 }
 
+.planZoneEditor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  background: var(--bg-muted);
+}
+
+.planWeekdayPicker {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.planWeekdayPicker .checkboxLine {
+  justify-content: center;
+  min-height: 42px;
+  padding: 8px;
+}
+
+.planZoneList {
+  display: grid;
+  gap: 10px;
+}
+
+.planZoneRow {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.1fr) 120px 150px;
+  gap: 10px;
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-elevated);
+}
+
+.planZoneRow.disabled {
+  opacity: 0.62;
+}
+
+.planZoneRow > div {
+  display: grid;
+  gap: 6px;
+  align-self: center;
+}
+
+.planZoneRow > div span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.planZoneRow > div strong {
+  color: var(--text);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
 .planPanelHead {
   display: flex;
   justify-content: space-between;
@@ -1272,7 +1562,145 @@ select {
 .planActions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   padding-top: 4px;
+}
+
+.planModeControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.planModeControl select {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  padding: 0 32px 0 10px;
+  font: inherit;
+}
+
+.strategyEditorPanel .fieldEditorForm {
+  align-items: start;
+}
+
+.strategyTypePicker,
+.strategyZonePicker {
+  grid-column: 1 / -1;
+}
+
+.strategyTypePicker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategyTypeCard {
+  display: grid;
+  gap: 6px;
+  min-height: 92px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  padding: 14px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.strategyTypeCard strong {
+  font-size: 0.95rem;
+}
+
+.strategyTypeCard span {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.strategyTypeCard.active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: rgba(var(--accent-rgb), 0.08);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.12);
+}
+
+.strategyZonePicker {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-muted);
+  padding: 12px;
+}
+
+.strategyZonePicker > span {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.strategyZonePicker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategyCard {
+  position: relative;
+  overflow: hidden;
+}
+
+.strategyCard::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--accent), #22c55e);
+}
+
+.strategySummary {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-muted);
+  padding: 12px;
+}
+
+.strategySummary strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.strategySummary span {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.planZoneChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.planZoneChips span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
 }
 
 /* —— 地图 —— */
@@ -1361,6 +1789,23 @@ select {
   color: #0f766e;
   background: rgba(240, 253, 250, 0.96);
   border-color: rgba(15, 118, 110, 0.22);
+}
+
+.mapFallbackNotice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapFallbackNotice button {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--bg-elevated);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .amapFieldMarker {
@@ -2285,7 +2730,9 @@ select {
   }
 
   .mapWorkflowActions,
-  .zoneDeviceRow {
+  .zoneDeviceRow,
+  .planZoneRow,
+  .planWeekdayPicker {
     grid-template-columns: 1fr;
   }
 

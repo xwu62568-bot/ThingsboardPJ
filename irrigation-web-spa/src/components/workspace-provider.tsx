@@ -15,13 +15,13 @@ import {
   fetchDeviceList,
   fetchDeviceListBasic,
   getCachedDeviceList,
+  getCachedFieldAssetRecords,
   hasFullCachedDeviceList,
   type TbFieldAssetRecord,
 } from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 import {
   buildDashboardSnapshot,
-  buildFieldSummaries,
   buildFieldSummariesFromRecords,
   buildPlanSummaries,
   buildStrategySummaries,
@@ -41,6 +41,7 @@ type WorkspaceContextValue = {
   loading: boolean;
   error: string;
   refreshDevices: () => Promise<void>;
+  refreshFields: () => Promise<void>;
   refreshWorkspace: () => Promise<void>;
 };
 
@@ -49,9 +50,11 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 export function WorkspaceProvider({ children }: PropsWithChildren) {
   const navigate = useNavigate();
   const [session] = useState<TbSession | null>(() => getStoredSession());
-  const [devices, setDevices] = useState<DeviceSummary[]>(() => getCachedDeviceList(session));
-  const [fieldRecords, setFieldRecords] = useState<TbFieldAssetRecord[]>([]);
-  const [loading, setLoading] = useState(() => getCachedDeviceList(session).length === 0);
+  const cachedDevices = getCachedDeviceList(session);
+  const cachedFields = getCachedFieldAssetRecords(session);
+  const [devices, setDevices] = useState<DeviceSummary[]>(() => cachedDevices);
+  const [fieldRecords, setFieldRecords] = useState<TbFieldAssetRecord[]>(() => cachedFields);
+  const [loading, setLoading] = useState(() => cachedDevices.length === 0 && cachedFields.length === 0);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -106,9 +109,7 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
     if (!session) {
       return null;
     }
-    const fields = buildFieldSummaries(devices);
-    const tbFields =
-      fieldRecords.length > 0 ? buildFieldSummariesFromRecords(fieldRecords, devices) : fields;
+    const tbFields = fieldRecords.length > 0 ? buildFieldSummariesFromRecords(fieldRecords, devices) : [];
     return {
       session,
       devices,
@@ -119,11 +120,12 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
       loading,
       error,
       refreshDevices: async () => {
-        const [full, fieldsFromTb] = await Promise.all([
-          fetchDeviceList(session),
-          fetchFieldAssetRecords(session).catch(() => []),
-        ]);
+        const full = await fetchDeviceList(session);
         setDevices(full);
+        setError("");
+      },
+      refreshFields: async () => {
+        const fieldsFromTb = await fetchFieldAssetRecords(session).catch(() => []);
         setFieldRecords(fieldsFromTb);
         setError("");
       },

@@ -20,7 +20,7 @@ type FieldFormState = {
 };
 
 export function FieldsPage() {
-  const { session, devices, fields, refreshDevices } = useWorkspace();
+  const { session, devices, fields, refreshFields } = useWorkspace();
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<FieldFormState>(() => buildEmptyForm(devices[0]?.id));
   const [saving, setSaving] = useState(false);
@@ -66,7 +66,7 @@ export function FieldsPage() {
         name: form.name.trim(),
         config: buildFieldConfig(form),
       });
-      await refreshDevices();
+      await refreshFields();
       setFormOpen(false);
       setMessage("地块已保存到 ThingsBoard");
     } catch (saveError) {

@@ -100,7 +100,7 @@ const AMAP_SECURITY_CODE = import.meta.env.VITE_AMAP_SECURITY_CODE?.trim() || ""
 let amapLoadingPromise: Promise<AMapConstructor> | null = null;
 
 export function MapPage() {
-  const { session, devices, fields, refreshWorkspace } = useWorkspace();
+  const { session, devices, fields, refreshFields } = useWorkspace();
   const [localFields, setLocalFields] = useState<FieldSummary[]>([]);
   const [drawingMode, setDrawingMode] = useState<"field" | "zone" | null>(null);
   const [draftBoundary, setDraftBoundary] = useState<BoundaryPoint[]>([]);
@@ -209,7 +209,7 @@ export function MapPage() {
       setZoneFormOpen(true);
       setDrawingMode("zone");
       setMessage("地块已保存，请继续在地图上绘制分区");
-      void refreshWorkspace();
+      void refreshFields();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "地块保存失败");
     } finally {
@@ -258,7 +258,7 @@ export function MapPage() {
       setZoneFormOpen(false);
       setDraftBoundary([]);
       setMessage("分区与设备已保存到 ThingsBoard");
-      void refreshWorkspace();
+      void refreshFields();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "分区保存失败");
     } finally {
@@ -435,6 +435,7 @@ function AmapFieldCanvas({
   const amapRef = useRef<AMapConstructor | null>(null);
   const mapInstanceRef = useRef<AMapInstance | null>(null);
   const mouseToolRef = useRef<AMapMouseTool | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [loadState, setLoadState] = useState<"fallback" | "loading" | "ready" | "error">(
     AMAP_KEY ? "loading" : "fallback",
   );
@@ -446,6 +447,7 @@ function AmapFieldCanvas({
 
   useEffect(() => {
     if (!AMAP_KEY || !mapRef.current) {
+      setLoadState("fallback");
       return;
     }
 
@@ -480,7 +482,7 @@ function AmapFieldCanvas({
       mapInstanceRef.current = null;
       amapRef.current = null;
     };
-  }, []);
+  }, [reloadKey]);
 
   useEffect(() => {
     const AMap = amapRef.current;
@@ -640,8 +642,14 @@ function AmapFieldCanvas({
     return (
       <MockFieldMap
         fields={fields}
-        message={loadState === "error" ? "高德地图加载失败，已切换为预览模式" : undefined}
+        message={!AMAP_KEY ? "未配置高德地图 Key，已切换为预览模式" : "高德地图加载失败"}
+        canRetry={Boolean(AMAP_KEY)}
         onSelectField={onSelectField}
+        onRetry={() => {
+          amapLoadingPromise = null;
+          setLoadState("loading");
+          setReloadKey((key) => key + 1);
+        }}
       />
     );
   }
@@ -660,18 +668,31 @@ function AmapFieldCanvas({
 }
 
 function MockFieldMap({
+  canRetry,
   fields,
   message,
   onSelectField,
+  onRetry,
 }: {
+  canRetry?: boolean;
   fields: FieldSummary[];
   message?: string;
   onSelectField: (fieldId: string) => void;
+  onRetry?: () => void;
 }) {
   return (
     <div className="mockMapCanvas">
       <div className="mapGrid" />
-      {message && <div className="mapFallbackNotice">{message}</div>}
+      {message && (
+        <div className="mapFallbackNotice">
+          <span>{message}</span>
+          {canRetry ? (
+            <button type="button" onClick={onRetry}>
+              重新加载
+            </button>
+          ) : null}
+        </div>
+      )}
       {fields.slice(0, 8).map((field, index) => (
         <button
           type="button"

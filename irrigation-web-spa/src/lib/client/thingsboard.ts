@@ -100,6 +100,7 @@ const unsupportedCustomerDeviceInfosKeys = new Set<string>();
 const deviceListCache = new Map<string, DeviceSummary[]>();
 const deviceListCacheMode = new Map<string, "basic" | "full">();
 const deviceDetailCache = new Map<string, DeviceState>();
+const fieldAssetCache = new Map<string, TbFieldAssetRecord[]>();
 const debugListeners = new Set<(entry: TbDebugEntry) => void>();
 const debugBuffer: TbDebugEntry[] = [];
 let debugSequence = 0;
@@ -175,13 +176,22 @@ export type TbRotationPlanConfig = {
   id: string;
   name: string;
   fieldId: string;
+  scheduleType?: "daily" | "weekly" | "interval";
+  weekdays?: number[];
+  intervalDays?: number;
   startAt: string;
   enabled: boolean;
   skipIfRain: boolean;
   mode: "manual" | "semi-auto" | "auto";
   zones: Array<{
+    zoneId?: string;
+    zoneName?: string;
     siteNumber: number;
+    deviceId?: string;
+    deviceName?: string;
+    order?: number;
     durationMinutes: number;
+    enabled?: boolean;
   }>;
 };
 
@@ -189,10 +199,22 @@ export type TbAutomationStrategyConfig = {
   id: string;
   name: string;
   fieldId: string;
+  type?: "threshold" | "quota" | "etc";
   enabled: boolean;
+  scope?: "field" | "zones";
+  zoneIds?: string[];
   moistureMin: number;
   moistureRecover: number;
   etcTriggerMm: number;
+  targetWaterMm?: number;
+  targetWaterM3PerMu?: number;
+  flowRateM3h?: number;
+  irrigationEfficiency?: number;
+  effectiveRainfallRatio?: number;
+  replenishRatio?: number;
+  minIntervalHours?: number;
+  maxDurationMinutes?: number;
+  splitRounds?: boolean;
   rainLockEnabled: boolean;
   mode: "advisory" | "semi-auto" | "auto";
 };
@@ -401,7 +423,7 @@ export async function fetchFieldAssetRecords(
 ): Promise<TbFieldAssetRecord[]> {
   const resolved = resolveRequiredSession(session);
   const rows = await fetchAccessibleAssetRows(resolved, FIELD_ASSET_TYPE);
-  return mapWithConcurrency(rows, 4, async (raw) => {
+  const records = await mapWithConcurrency(rows, 4, async (raw) => {
     const item = (raw ?? {}) as Record<string, unknown>;
     const assetId = extractEntityId(item.id);
     const [attributes, telemetry] = assetId
@@ -420,6 +442,26 @@ export async function fetchFieldAssetRecords(
       telemetry,
     };
   });
+  setCachedFieldAssetRecords(resolved, records);
+  return records;
+}
+
+export function getCachedFieldAssetRecords(session?: TbSession | null): TbFieldAssetRecord[] {
+  try {
+    const resolved = resolveRequiredSession(session);
+    const cacheKey = getFieldAssetCacheKey(resolved);
+    const cached = fieldAssetCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const persisted = readPersistedFieldAssetRecords(cacheKey);
+    if (persisted.length > 0) {
+      fieldAssetCache.set(cacheKey, persisted);
+    }
+    return persisted;
+  } catch {
+    return [];
+  }
 }
 
 export async function saveFieldAssetRecord(input: {
@@ -452,7 +494,7 @@ export async function saveFieldAssetRecord(input: {
     throw new Error("ThingsBoard 未返回地块 Asset ID");
   }
   await saveEntityAttributes(resolved, { entityType: "ASSET", id: assetId }, input.config);
-  return {
+  const record = {
     id: assetId,
     name: typeof saved.name === "string" ? saved.name : input.name,
     label: typeof saved.label === "string" ? saved.label : input.label,
@@ -460,6 +502,8 @@ export async function saveFieldAssetRecord(input: {
     config: input.config,
     telemetry: {},
   };
+  upsertCachedFieldAssetRecord(resolved, record);
+  return record;
 }
 
 export async function saveFieldRotationPlans(input: {
@@ -471,6 +515,7 @@ export async function saveFieldRotationPlans(input: {
   await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
     rotationPlans: input.plans,
   });
+  updateCachedFieldAssetConfig(resolved, input.fieldId, { rotationPlans: input.plans });
 }
 
 export async function saveFieldAutomationStrategies(input: {
@@ -482,6 +527,7 @@ export async function saveFieldAutomationStrategies(input: {
   await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
     automationStrategies: input.strategies,
   });
+  updateCachedFieldAssetConfig(resolved, input.fieldId, { automationStrategies: input.strategies });
 }
 
 async function mapToDeviceSummary(
@@ -1026,6 +1072,8 @@ function clearTbClientCaches() {
   deviceListCache.clear();
   deviceListCacheMode.clear();
   deviceDetailCache.clear();
+  fieldAssetCache.clear();
+  clearPersistedFieldAssetRecords();
 }
 
 function getSessionCacheScope(session: TbSession) {
@@ -1038,6 +1086,85 @@ function getDeviceListCacheKey(session: TbSession) {
 
 function getDeviceDetailCacheKey(session: TbSession, deviceId: string) {
   return `${getSessionCacheScope(session)}::${deviceId}`;
+}
+
+function getFieldAssetCacheKey(session: TbSession) {
+  return getSessionCacheScope(session);
+}
+
+function getPersistedFieldAssetCacheKey(cacheKey: string) {
+  return `tb_field_assets::${cacheKey}`;
+}
+
+function setCachedFieldAssetRecords(session: TbSession, records: TbFieldAssetRecord[]) {
+  const cacheKey = getFieldAssetCacheKey(session);
+  fieldAssetCache.set(cacheKey, records);
+  persistFieldAssetRecords(cacheKey, records);
+}
+
+function upsertCachedFieldAssetRecord(session: TbSession, record: TbFieldAssetRecord) {
+  const cacheKey = getFieldAssetCacheKey(session);
+  const current = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
+  const next = [record, ...current.filter((item) => item.id !== record.id)];
+  fieldAssetCache.set(cacheKey, next);
+  persistFieldAssetRecords(cacheKey, next);
+}
+
+function updateCachedFieldAssetConfig(
+  session: TbSession,
+  fieldId: string,
+  patch: Partial<TbFieldAssetConfig>,
+) {
+  const cacheKey = getFieldAssetCacheKey(session);
+  const current = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
+  if (current.length === 0) {
+    return;
+  }
+  const next = current.map((record) =>
+    record.id === fieldId ? { ...record, config: { ...record.config, ...patch } } : record,
+  );
+  fieldAssetCache.set(cacheKey, next);
+  persistFieldAssetRecords(cacheKey, next);
+}
+
+function persistFieldAssetRecords(cacheKey: string, records: TbFieldAssetRecord[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(getPersistedFieldAssetCacheKey(cacheKey), JSON.stringify(records));
+  } catch {
+    // Ignore storage quota/private mode failures; in-memory cache still works.
+  }
+}
+
+function readPersistedFieldAssetRecords(cacheKey: string): TbFieldAssetRecord[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(getPersistedFieldAssetCacheKey(cacheKey));
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as TbFieldAssetRecord[]) : [];
+  } catch {
+    window.localStorage.removeItem(getPersistedFieldAssetCacheKey(cacheKey));
+    return [];
+  }
+}
+
+function clearPersistedFieldAssetRecords() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+    const key = window.localStorage.key(index);
+    if (key?.startsWith("tb_field_assets::")) {
+      window.localStorage.removeItem(key);
+    }
+  }
 }
 
 async function fetchAccessibleDeviceRows(session: TbSession) {

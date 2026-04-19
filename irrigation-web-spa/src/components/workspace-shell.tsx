@@ -39,6 +39,8 @@ function WorkspaceShellInner() {
   const { loading, error } = useWorkspace();
   const isDashboard = location.pathname === "/dashboard";
   const isMap = location.pathname === "/map";
+  const isPlans = location.pathname === "/plans";
+  const isStrategies = location.pathname === "/strategies";
   const isFieldDetail = /^\/fields\/[^/]+/.test(location.pathname);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -169,6 +171,20 @@ function WorkspaceShellInner() {
               >
                 新建地块
               </button>
+            </div>
+          ) : null}
+          {isPlans ? (
+            <div className="headerActions">
+              <Link className="primaryButton" to="/plans/new">
+                新增计划
+              </Link>
+            </div>
+          ) : null}
+          {isStrategies ? (
+            <div className="headerActions">
+              <Link className="primaryButton" to="/strategies/new">
+                新增策略
+              </Link>
             </div>
           ) : null}
         </header>
