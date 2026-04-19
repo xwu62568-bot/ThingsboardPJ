@@ -5,14 +5,16 @@ import { useNavigate } from "react-router-dom";
 import { DEFAULT_TB_BASE_URL, loginToThingsBoard } from "@/lib/client/thingsboard";
 import { getStoredSession, storeSession } from "@/lib/client/session";
 
+const THINGSBOARD_CLOUD_URL = "https://thingsboard.cloud/";
+
 const TB_BASE_URL_OPTIONS = [
-  DEFAULT_TB_BASE_URL,
-  "https://thingsboard.cloud/",
+  { label: "ThingsBoard Cloud", value: THINGSBOARD_CLOUD_URL },
+  { label: "自建平台", value: DEFAULT_TB_BASE_URL },
 ];
 
 export function LoginForm() {
   const navigate = useNavigate();
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_TB_BASE_URL);
+  const [baseUrl, setBaseUrl] = useState(THINGSBOARD_CLOUD_URL);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -55,8 +57,8 @@ export function LoginForm() {
           onChange={(event) => setBaseUrl(event.target.value)}
         >
           {TB_BASE_URL_OPTIONS.map((option) => (
-            <option key={option} value={option}>
-              {option}
+            <option key={option.value} value={option.value}>
+              {option.label}
             </option>
           ))}
         </select>
