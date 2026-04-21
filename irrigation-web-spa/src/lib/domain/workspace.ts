@@ -19,6 +19,9 @@ export type FieldSummary = {
   boundary?: Array<[number, number]>;
   mapZones?: NonNullable<TbFieldAssetRecord["config"]["zones"]>;
   deviceMarkers?: NonNullable<TbFieldAssetRecord["config"]["deviceMarkers"]>;
+  executionState?: TbFieldAssetRecord["config"]["irrigationExecutionState"];
+  manualExecutionRequest?: TbFieldAssetRecord["config"]["manualExecutionRequest"];
+  manualExecutionRequestConsumedId?: string;
   zoneCount: number;
   batteryLevel: number;
   soilMoisture: number;
@@ -203,6 +206,9 @@ export function buildFieldSummariesFromRecords(
       boundary: normalizeBoundary(record.config.boundary),
       mapZones: normalizeZones(record.config.zones),
       deviceMarkers: normalizeDeviceMarkers(record.config.deviceMarkers),
+      executionState: record.config.irrigationExecutionState,
+      manualExecutionRequest: record.config.manualExecutionRequest,
+      manualExecutionRequestConsumedId: record.config.manualExecutionRequestConsumedId,
       zoneCount,
       batteryLevel,
       soilMoisture,

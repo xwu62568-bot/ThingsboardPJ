@@ -618,14 +618,15 @@ function AmapFieldCanvas({
 
     const overlays: AMapOverlay[] = [];
     for (const field of fields) {
+      const fieldStyle = getFieldMapStyle(field);
       if (field.boundary?.length) {
         const polygon = new AMap.Polygon({
           path: field.boundary,
-          strokeColor: getFieldColor(field),
+          strokeColor: fieldStyle.stroke,
           strokeWeight: selectedFieldId === field.id ? 3 : 2,
           strokeOpacity: 0.9,
-          fillColor: getFieldColor(field),
-          fillOpacity: selectedFieldId === field.id ? 0.24 : 0.18,
+          fillColor: fieldStyle.fill,
+          fillOpacity: selectedFieldId === field.id ? fieldStyle.fillOpacity + 0.06 : fieldStyle.fillOpacity,
           zIndex: 8,
         });
         polygon.setMap?.(map);
@@ -636,13 +637,14 @@ function AmapFieldCanvas({
       }
 
       for (const zone of field.mapZones ?? []) {
+        const zoneStyle = getZoneMapStyle(field);
         const zonePolygon = new AMap.Polygon({
           path: zone.boundary,
-          strokeColor: "#2563eb",
-          strokeWeight: 1,
-          strokeOpacity: 0.76,
-          fillColor: "#60a5fa",
-          fillOpacity: 0.1,
+          strokeColor: zoneStyle.stroke,
+          strokeWeight: zoneStyle.strokeWeight,
+          strokeOpacity: 0.82,
+          fillColor: zoneStyle.fill,
+          fillOpacity: zoneStyle.fillOpacity,
           zIndex: 12,
         });
         zonePolygon.setMap?.(map);
@@ -721,11 +723,11 @@ function AmapFieldCanvas({
     if (draftBoundary.length >= 3) {
       const draft = new AMap.Polygon({
         path: draftBoundary,
-        strokeColor: "#0f766e",
+        strokeColor: "#16a34a",
         strokeWeight: 3,
         strokeOpacity: 1,
-        fillColor: "#14b8a6",
-        fillOpacity: 0.14,
+        fillColor: "#16a34a",
+        fillOpacity: 0.16,
         zIndex: 20,
       });
       draft.setMap?.(map);
@@ -769,10 +771,10 @@ function AmapFieldCanvas({
           mouseTool.close(false);
         });
         mouseTool.polygon({
-          strokeColor: "#0f766e",
+          strokeColor: "#16a34a",
           strokeWeight: 3,
           strokeOpacity: 1,
-          fillColor: "#14b8a6",
+          fillColor: "#16a34a",
           fillOpacity: 0.18,
         });
       })
@@ -1659,14 +1661,43 @@ function parseOptionalNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function getFieldColor(field: FieldSummary) {
+function getFieldMapStyle(field: FieldSummary) {
   if (field.irrigationState === "running") {
-    return "#059669";
+    return {
+      stroke: "#0284c7",
+      fill: "#0284c7",
+      fillOpacity: 0.28,
+    };
   }
   if (field.irrigationState === "attention") {
-    return "#d97706";
+    return {
+      stroke: "#d97706",
+      fill: "#d97706",
+      fillOpacity: 0.3,
+    };
   }
-  return "#0f766e";
+  return {
+    stroke: "#16a34a",
+    fill: "#16a34a",
+    fillOpacity: 0.24,
+  };
+}
+
+function getZoneMapStyle(field: FieldSummary) {
+  if (field.irrigationState === "running") {
+    return {
+      stroke: "#0284c7",
+      fill: "#0ea5e9",
+      fillOpacity: 0.24,
+      strokeWeight: 2,
+    };
+  }
+  return {
+    stroke: "#15803d",
+    fill: "#86efac",
+    fillOpacity: 0.22,
+    strokeWeight: 1,
+  };
 }
 
 function formatFieldState(state: FieldSummary["irrigationState"]) {

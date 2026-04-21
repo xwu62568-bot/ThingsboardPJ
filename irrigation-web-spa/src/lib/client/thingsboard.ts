@@ -198,6 +198,13 @@ export type TbFieldAssetConfig = {
   irrigationEfficiency?: number;
   rotationPlans?: unknown[];
   automationStrategies?: unknown[];
+  manualExecutionRequest?: {
+    id?: string;
+    executionId?: string;
+    requestedAt?: number;
+  };
+  manualExecutionRequestConsumedId?: string;
+  irrigationExecutionState?: unknown;
 };
 
 export type TbFieldAssetRecord = {
@@ -3140,6 +3147,17 @@ function mapFieldAssetConfig(attributes: Record<string, unknown>): TbFieldAssetC
     rotationPlans: Array.isArray(attributes.rotationPlans) ? attributes.rotationPlans : undefined,
     automationStrategies: Array.isArray(attributes.automationStrategies)
       ? attributes.automationStrategies
+      : undefined,
+    manualExecutionRequest: isRecord(attributes.manualExecutionRequest)
+      ? {
+          id: toStringValue(attributes.manualExecutionRequest.id),
+          executionId: toStringValue(attributes.manualExecutionRequest.executionId),
+          requestedAt: toInt(attributes.manualExecutionRequest.requestedAt) ?? undefined,
+        }
+      : undefined,
+    manualExecutionRequestConsumedId: toStringValue(attributes.manualExecutionRequestConsumedId),
+    irrigationExecutionState: isRecord(attributes.irrigationExecutionState) || typeof attributes.irrigationExecutionState === "string"
+      ? attributes.irrigationExecutionState
       : undefined,
   };
 }
