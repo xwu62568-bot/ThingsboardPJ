@@ -845,16 +845,25 @@ select {
 }
 
 .dashboardAmapShell {
-  height: 100%;
+  height: 620px;
   min-height: 620px;
 }
 
-.dashboardAmapShell .amapCanvas {
+.dashboardAmapCanvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
   min-height: 620px;
 }
 
 .dashboardMapFallback {
   position: relative;
+  min-height: 430px;
+}
+
+.dashboardMapFrame {
+  position: relative;
+  min-height: 620px;
 }
 
 .dashboardAmapMarker {
@@ -905,6 +914,28 @@ select {
 .dashboardMapField circle {
   stroke: #fff;
   stroke-width: 3;
+}
+
+.dashboardMapZone {
+  stroke-linejoin: round;
+}
+
+.dashboardMapZone--idle {
+  fill: rgba(134, 239, 172, 0.46);
+  stroke: #15803d;
+  stroke-width: 1.6;
+}
+
+.dashboardMapZone--running {
+  fill: rgba(14, 165, 233, 0.56);
+  stroke: #0284c7;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
+.dashboardZoneMarker--running {
+  background: rgba(2, 132, 199, 0.94);
+  box-shadow: 0 10px 22px rgba(2, 132, 199, 0.26);
 }
 
 .dashboardMapField text {
@@ -1024,12 +1055,24 @@ select {
 }
 
 .dashboardMapLegend {
-  display: flex;
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 2;
+  display: inline-flex;
   flex-wrap: wrap;
   gap: 10px;
+  align-items: center;
+  max-width: min(92%, 340px);
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
   color: var(--text-secondary);
-  font-size: 0.8125rem;
+  font-size: 0.6875rem;
   font-weight: 700;
+  backdrop-filter: blur(8px);
 }
 
 .dashboardMapLegend span {
@@ -1039,8 +1082,8 @@ select {
 }
 
 .legendDot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
 }
 
@@ -1790,9 +1833,30 @@ select {
   align-self: center;
 }
 
+.zoneDeviceRowHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .zoneDeviceRow label {
   display: grid;
   gap: 5px;
+}
+
+.devicePlacementMeta {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.mockMapCanvas--placing {
+  cursor: crosshair;
+}
+
+.mapFallbackNotice--placing {
+  top: auto;
+  bottom: 16px;
 }
 
 .planZoneEditor {
@@ -2095,6 +2159,54 @@ select {
   border-color: rgba(15, 118, 110, 0.22);
 }
 
+.mapStatusLegend {
+  position: absolute;
+  z-index: 2;
+  right: 14px;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(10px);
+}
+
+.mapStatusLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #475569;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.mapLegendSwatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.mapLegendSwatch--online {
+  background: #16a34a;
+}
+
+.mapLegendSwatch--pending {
+  background: #f59e0b;
+}
+
+.mapLegendSwatch--error {
+  background: #dc2626;
+}
+
+.mapLegendSwatch--offline {
+  background: #64748b;
+}
+
 .mapFallbackNotice {
   display: inline-flex;
   align-items: center;
@@ -2113,40 +2225,27 @@ select {
 }
 
 .amapFieldMarker {
-  display: grid;
-  gap: 2px;
-  min-width: 118px;
-  padding: 8px 10px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(63, 63, 70, 0.16);
-  box-shadow: 0 12px 26px rgba(24, 24, 27, 0.16);
-  color: #18181b;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 136px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  color: #0f172a;
+  backdrop-filter: blur(8px);
   cursor: pointer;
 }
 
-.amapFieldMarker span {
-  color: #71717a;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-
 .amapFieldMarker strong {
-  color: #18181b;
-  font-size: 13px;
+  color: #0f172a;
+  font-size: 11px;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.amapFieldMarker--running {
-  background: #ecfdf5;
-  border-color: rgba(5, 150, 105, 0.32);
-}
-
-.amapFieldMarker--attention {
-  background: #fffbeb;
-  border-color: rgba(180, 83, 9, 0.32);
 }
 
 .amapZoneMarker {
@@ -2170,26 +2269,55 @@ select {
 }
 
 .amapDeviceMarker span {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #111827;
-  border: 3px solid #facc15;
-  box-shadow: 0 10px 20px rgba(17, 24, 39, 0.28);
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px 12px 12px 4px;
+  background: #334155;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.28);
+}
+
+.amapDeviceMarker span svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .amapDeviceMarker strong {
-  max-width: 92px;
-  padding: 3px 7px;
+  max-width: 76px;
+  padding: 2px 6px;
   border-radius: 999px;
-  color: #111827;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(17, 24, 39, 0.1);
-  font-size: 11px;
+  color: #334155;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  font-size: 10px;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.amapDeviceMarker--online span {
+  background: #16a34a;
+}
+
+.amapDeviceMarker--offline span {
+  background: #64748b;
+}
+
+.amapDeviceMarker--pending span {
+  background: #f59e0b;
+}
+
+.amapDeviceMarker--error span {
+  background: #dc2626;
 }
 
 .mapGrid {

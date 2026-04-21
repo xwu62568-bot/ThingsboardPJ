@@ -24,11 +24,13 @@ type AMapInstance = {
   destroy: () => void;
   setFitView: (overlays?: unknown[]) => void;
   clearMap: () => void;
+  on?: (eventName: string, handler: (event: { lnglat?: { lng: number; lat: number } }) => void) => void;
+  off?: (eventName: string, handler: (event: { lnglat?: { lng: number; lat: number } }) => void) => void;
 };
 
 type AMapOverlay = {
   setMap?: (target: AMapInstance) => void;
-  on?: (eventName: string, handler: () => void) => void;
+  on?: (eventName: string, handler: (event?: { lnglat?: { lng: number; lat: number } }) => void) => void;
   getPath?: () => Array<{ lng: number; lat: number }>;
 };
 
@@ -53,6 +55,7 @@ type AMapConstructor = {
     title: string;
     content: string;
     offset?: unknown;
+    draggable?: boolean;
   }) => AMapOverlay;
   Polygon: new (options: {
     path: BoundaryPoint[];
@@ -95,6 +98,8 @@ type ZoneFormState = {
   deviceBindings: Array<{
     deviceId: string;
     siteNumber: string;
+    lng?: number;
+    lat?: number;
   }>;
 };
 
@@ -118,6 +123,26 @@ export function MapPage() {
   const [form, setForm] = useState<FieldFormState>(() => buildEmptyForm());
   const [zoneForm, setZoneForm] = useState<ZoneFormState>(() => buildEmptyZoneForm());
   const mapFields = useMemo(() => mergeFields(fields, localFields), [fields, localFields]);
+  const draftDeviceMarkers = useMemo(
+    () =>
+      zoneForm.deviceBindings
+        .map((binding) => {
+          if (binding.lng === undefined || binding.lat === undefined) {
+            return null;
+          }
+          const device = devices.find((item) => item.id === binding.deviceId);
+          return {
+            deviceId: binding.deviceId,
+            name: device?.name ?? "现场设备",
+            role: device?.isGateway ? "gateway" : "controller",
+            lng: binding.lng,
+            lat: binding.lat,
+            siteNumber: Math.max(1, Math.round(parseOptionalNumber(binding.siteNumber) ?? 1)),
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+    [devices, zoneForm.deviceBindings],
+  );
   const [selectedFieldId, setSelectedFieldId] = useState("");
   const selectedField = selectedFieldId
     ? mapFields.find((field) => field.id === selectedFieldId)
@@ -252,6 +277,13 @@ export function MapPage() {
       if (zoneForm.deviceBindings.length === 0) {
         throw new Error("请先选择分区设备和站点");
       }
+      if (
+        zoneForm.deviceBindings.some(
+          (binding) => binding.lng === undefined || binding.lat === undefined,
+        )
+      ) {
+        throw new Error("请先在地图上放置每台设备的位置");
+      }
       const fieldId = await ensureThingsBoardField(session, selectedField);
       const nextConfig = buildUpdatedFieldConfigForZone(
         selectedField,
@@ -337,9 +369,17 @@ export function MapPage() {
           </div>
 
           <AmapFieldCanvas
+            devices={devices}
             drawingMode={drawingMode}
             draftBoundary={draftBoundary}
+            draftDeviceMarkers={zoneFormOpen ? draftDeviceMarkers : []}
             fields={mapFields}
+            markerEditable={zoneFormOpen && drawingMode === null}
+            onDeviceMarkerMove={(deviceId, point) => {
+              updateZoneDevicePosition(setZoneForm, deviceId, point);
+              setMessage("设备位置已更新，可继续拖动微调");
+              setError("");
+            }}
             selectedFieldId={activeMapFieldId}
             editing={workflowStep !== "browse"}
             onSelectField={(fieldId) => {
@@ -362,7 +402,9 @@ export function MapPage() {
               form={form}
               saving={saving}
               setForm={setForm}
-              onCancel={() => setFormOpen(false)}
+              onCancel={() => {
+                setFormOpen(false);
+              }}
               onSubmit={submit}
             />
           ) : zoneFormOpen && selectedField ? (
@@ -373,7 +415,9 @@ export function MapPage() {
               saving={saving}
               selectedField={selectedField}
               setForm={setZoneForm}
-              onCancel={() => setZoneFormOpen(false)}
+              onCancel={() => {
+                setZoneFormOpen(false);
+              }}
               onSubmit={submitZone}
             />
           ) : (
@@ -475,19 +519,34 @@ export function MapPage() {
 }
 
 function AmapFieldCanvas({
+  devices,
   drawingMode,
   draftBoundary,
+  draftDeviceMarkers,
   editing,
   fields,
+  markerEditable,
+  onDeviceMarkerMove,
   selectedFieldId,
   onSelectField,
   onBoundaryDrawn,
   onDrawFailed,
 }: {
+  devices: DeviceSummary[];
   drawingMode: "field" | "zone" | null;
   draftBoundary: BoundaryPoint[];
+  draftDeviceMarkers: Array<{
+    deviceId: string;
+    name: string;
+    role: string;
+    lng: number;
+    lat: number;
+    siteNumber?: number;
+  }>;
   editing: boolean;
   fields: FieldSummary[];
+  markerEditable: boolean;
+  onDeviceMarkerMove: (deviceId: string, point: BoundaryPoint) => void;
   selectedFieldId?: string;
   onSelectField: (fieldId: string) => void;
   onBoundaryDrawn: (boundary: BoundaryPoint[]) => void;
@@ -601,11 +660,15 @@ function AmapFieldCanvas({
       }
 
       for (const deviceMarker of field.deviceMarkers ?? []) {
+        const markerMeta = resolveDeviceMarkerMeta(
+          devices.find((device) => device.id === deviceMarker.deviceId),
+        );
         const marker = new AMap.Marker({
           position: [deviceMarker.lng, deviceMarker.lat],
           title: deviceMarker.name,
-          content: buildDeviceMarkerContent(deviceMarker),
+          content: buildDeviceMarkerContent(deviceMarker, markerMeta),
           offset: new AMap.Pixel(-14, -28),
+          draggable: false,
         });
         marker.on?.("click", () => {
           if (!editing) {
@@ -620,10 +683,36 @@ function AmapFieldCanvas({
         position: [field.centerLng, field.centerLat],
         title: field.name,
         content: buildMarkerContent(field),
-        offset: new AMap.Pixel(-18, -18),
+        offset: new AMap.Pixel(-42, -14),
       });
       marker.on?.("click", () => {
         onSelectField(field.id);
+      });
+      marker.setMap?.(map);
+      overlays.push(marker);
+    }
+
+    for (const deviceMarker of draftDeviceMarkers) {
+      const markerMeta = resolveDeviceMarkerMeta(
+        devices.find((device) => device.id === deviceMarker.deviceId),
+      );
+      const marker = new AMap.Marker({
+        position: [deviceMarker.lng, deviceMarker.lat],
+        title: deviceMarker.name,
+        content: buildDeviceMarkerContent(deviceMarker, markerMeta),
+        offset: new AMap.Pixel(-14, -28),
+        draggable: markerEditable,
+      });
+      marker.on?.("dragend", (event) => {
+        const lng = event?.lnglat?.lng;
+        const lat = event?.lnglat?.lat;
+        if (lng === undefined || lat === undefined) {
+          return;
+        }
+        onDeviceMarkerMove(deviceMarker.deviceId, [
+          Number(lng.toFixed(6)),
+          Number(lat.toFixed(6)),
+        ]);
       });
       marker.setMap?.(map);
       overlays.push(marker);
@@ -646,7 +735,7 @@ function AmapFieldCanvas({
     if (overlays.length > 0) {
       map.setFitView(overlays);
     }
-  }, [draftBoundary, editing, fields, loadState, onSelectField, selectedFieldId]);
+  }, [devices, draftBoundary, draftDeviceMarkers, editing, fields, loadState, markerEditable, onDeviceMarkerMove, onSelectField, selectedFieldId]);
 
   useEffect(() => {
     const AMap = amapRef.current;
@@ -724,7 +813,20 @@ function AmapFieldCanvas({
           {drawingMode === "zone" ? "点击地图绘制分区边界，双击完成" : "点击地图绘制地块边界，双击完成"}
         </div>
       )}
+      {markerEditable && !drawingMode ? (
+        <div className="mapDrawNotice">设备已默认放入分区，可直接拖动调整位置</div>
+      ) : null}
+      <MapStatusLegend />
       <div className="amapCanvas" ref={mapRef} />
+    </div>
+  );
+}
+
+function MapStatusLegend() {
+  return (
+    <div className="mapStatusLegend" aria-label="地图图例">
+      <span><i className="mapLegendSwatch mapLegendSwatch--online" />在线</span>
+      <span><i className="mapLegendSwatch mapLegendSwatch--offline" />离线</span>
     </div>
   );
 }
@@ -957,6 +1059,7 @@ function ZoneCreatePanel({
       <p className="sidePanelTip">
         当前地块：{selectedField.name}，已圈出 {draftBoundary.length} 个分区边界点。
       </p>
+      <p className="sidePanelTip">设备添加后会默认落在分区内，直接拖动地图上的设备图标即可调整位置。</p>
       <form className="mapSideForm" onSubmit={onSubmit}>
         <label>
           <span>分区名称</span>
@@ -968,7 +1071,7 @@ function ZoneCreatePanel({
             value=""
             onChange={(event) => {
               if (event.target.value) {
-                addZoneDeviceBinding(setForm, event.target.value);
+                addZoneDeviceBinding(setForm, event.target.value, draftBoundary);
               }
             }}
           >
@@ -982,13 +1085,17 @@ function ZoneCreatePanel({
         </label>
         <div className="zoneDeviceList side">
           {form.deviceBindings.length === 0 ? (
-            <p>一个分区可添加多台设备；多站点设备需要选择站点。</p>
+            <p>一个分区可添加多台设备；添加后会先默认放到分区上，可再手动调整位置。</p>
           ) : (
             form.deviceBindings.map((binding) => {
               const device = devices.find((item) => item.id === binding.deviceId);
+              const markerMeta = resolveDeviceMarkerMeta(device);
               return (
                 <div className="zoneDeviceRow side" key={binding.deviceId}>
-                  <strong>{device?.name ?? binding.deviceId}</strong>
+                  <div className="zoneDeviceRowHead">
+                    <strong>{device?.name ?? binding.deviceId}</strong>
+                    <span className={`statusPill ${markerMeta.pillClass}`}>{markerMeta.label}</span>
+                  </div>
                   <label>
                     <span>站点</span>
                     <select
@@ -1002,7 +1109,18 @@ function ZoneCreatePanel({
                       ))}
                     </select>
                   </label>
-                  <button className="ghostButton" type="button" onClick={() => removeZoneDeviceBinding(setForm, binding.deviceId)}>
+                  <div className="devicePlacementMeta">
+                    <span>
+                      {binding.lng !== undefined && binding.lat !== undefined
+                        ? `已放置：${binding.lng.toFixed(6)}, ${binding.lat.toFixed(6)}`
+                        : "将自动放置在分区内"}
+                    </span>
+                  </div>
+                  <button
+                    className="ghostButton"
+                    type="button"
+                    onClick={() => removeZoneDeviceBinding(setForm, binding.deviceId)}
+                  >
                     移除
                   </button>
                 </div>
@@ -1243,6 +1361,8 @@ function buildUpdatedFieldConfigForZone(
   const deviceBindings = zoneForm.deviceBindings.map((binding) => ({
     deviceId: binding.deviceId,
     siteNumber: Math.max(1, Math.round(parseOptionalNumber(binding.siteNumber) ?? 1)),
+    lng: binding.lng,
+    lat: binding.lat,
   }));
   const nextZone: FieldZone = {
     id: `${fieldId}-zone-${Date.now()}`,
@@ -1367,18 +1487,26 @@ function buildZoneDeviceMarkers(zone: FieldZone, devices: DeviceSummary[]): Devi
   if (bindings.length === 0) {
     return [];
   }
+  const normalizedBindings = bindings.map((binding) => {
+    const withPosition = binding as typeof binding & { lng?: number; lat?: number };
+    return {
+      ...binding,
+      lng: typeof withPosition.lng === "number" ? withPosition.lng : undefined,
+      lat: typeof withPosition.lat === "number" ? withPosition.lat : undefined,
+    };
+  });
   const center = calculateCenter(zone.boundary);
   const radiusLng = 0.00018;
   const radiusLat = 0.00012;
-  return bindings.map((binding, index) => {
+  return normalizedBindings.map((binding, index) => {
     const device = devices.find((item) => item.id === binding.deviceId);
     const angle = (Math.PI * 2 * index) / Math.max(bindings.length, 1);
     return {
       deviceId: binding.deviceId,
       name: device?.name ?? `设备${index + 1}`,
       role: device?.isGateway ? "gateway" : "controller",
-      lng: Number((center[0] + Math.cos(angle) * radiusLng).toFixed(6)),
-      lat: Number((center[1] + Math.sin(angle) * radiusLat).toFixed(6)),
+      lng: Number(((typeof binding.lng === "number" ? binding.lng : center[0] + Math.cos(angle) * radiusLng)).toFixed(6)),
+      lat: Number(((typeof binding.lat === "number" ? binding.lat : center[1] + Math.sin(angle) * radiusLat)).toFixed(6)),
       zoneId: zone.id,
       siteNumber: binding.siteNumber ?? zone.siteNumber,
     };
@@ -1452,14 +1580,25 @@ function setZoneFormValue(
 function addZoneDeviceBinding(
   setForm: Dispatch<SetStateAction<ZoneFormState>>,
   deviceId: string,
+  boundary: BoundaryPoint[],
 ) {
   setForm((current) => {
     if (current.deviceBindings.some((binding) => binding.deviceId === deviceId)) {
       return current;
     }
+    const nextIndex = current.deviceBindings.length;
+    const defaultPosition = buildDefaultDevicePlacement(boundary, nextIndex);
     return {
       ...current,
-      deviceBindings: [...current.deviceBindings, { deviceId, siteNumber: "1" }],
+      deviceBindings: [
+        ...current.deviceBindings,
+        {
+          deviceId,
+          siteNumber: "1",
+          lng: defaultPosition[0],
+          lat: defaultPosition[1],
+        },
+      ],
     };
   });
 }
@@ -1475,6 +1614,30 @@ function updateZoneDeviceSite(
       binding.deviceId === deviceId ? { ...binding, siteNumber } : binding,
     ),
   }));
+}
+
+function updateZoneDevicePosition(
+  setForm: Dispatch<SetStateAction<ZoneFormState>>,
+  deviceId: string,
+  point: BoundaryPoint,
+) {
+  setForm((current) => ({
+    ...current,
+    deviceBindings: current.deviceBindings.map((binding) =>
+      binding.deviceId === deviceId ? { ...binding, lng: point[0], lat: point[1] } : binding,
+    ),
+  }));
+}
+
+function buildDefaultDevicePlacement(boundary: BoundaryPoint[], index: number): BoundaryPoint {
+  const center = calculateCenter(boundary);
+  const radiusLng = 0.00016;
+  const radiusLat = 0.0001;
+  const angle = (Math.PI * 2 * index) / Math.max(index + 1, 3);
+  return [
+    Number((center[0] + Math.cos(angle) * radiusLng).toFixed(6)),
+    Number((center[1] + Math.sin(angle) * radiusLat).toFixed(6)),
+  ];
 }
 
 function removeZoneDeviceBinding(
@@ -1532,9 +1695,8 @@ function isThingsBoardId(value: string) {
 
 function buildMarkerContent(field: FieldSummary) {
   return `
-    <div class="amapFieldMarker amapFieldMarker--${field.irrigationState}">
-      <span>${escapeHtml(field.code)}</span>
-      <strong>${escapeHtml(field.name)}</strong>
+    <div class="amapFieldMarker">
+      <strong>${escapeHtml(getCompactFieldLabel(field.name))}</strong>
     </div>
   `;
 }
@@ -1547,12 +1709,110 @@ function buildZoneMarkerContent(zone: FieldZone) {
   `;
 }
 
-function buildDeviceMarkerContent(marker: DeviceMarker) {
+function buildDeviceMarkerContent(
+  marker: DeviceMarker | (DeviceMarker & { siteNumber?: number }),
+  meta: { className: string; icon: string },
+) {
+  const shortName = getCompactDeviceLabel(marker.name);
   return `
-    <div class="amapDeviceMarker" title="${escapeHtml(marker.name)}">
-      <span></span>
-      <strong>${escapeHtml(marker.name)}${marker.siteNumber ? ` · ${marker.siteNumber}站` : ""}</strong>
+    <div class="amapDeviceMarker ${meta.className}" title="${escapeHtml(marker.name)}">
+      <span>${meta.icon}</span>
+      <strong>${escapeHtml(shortName)}${marker.siteNumber ? ` · ${marker.siteNumber}站` : ""}</strong>
     </div>
+  `;
+}
+
+function resolveDeviceMarkerMeta(device?: DeviceSummary) {
+  const icon = device?.isGateway ? buildGatewayIcon() : buildControllerIcon();
+  if (device?.isGateway) {
+    if (device.gatewayState === "online") {
+      return {
+        className: "amapDeviceMarker--online",
+        label: "在线",
+        pillClass: "connected",
+        icon,
+      };
+    }
+    if (device.gatewayState === "offline") {
+      return {
+        className: "amapDeviceMarker--offline",
+        label: "离线",
+        pillClass: "disconnected",
+        icon,
+      };
+    }
+  }
+  switch (device?.bleConnectivityState ?? device?.connectivityState) {
+    case "connected":
+      return {
+        className: "amapDeviceMarker--online",
+        label: "在线",
+        pillClass: "connected",
+        icon,
+      };
+    case "error":
+      return {
+        className: "amapDeviceMarker--error",
+        label: "异常",
+        pillClass: "error",
+        icon,
+      };
+    case "connecting":
+      return {
+        className: "amapDeviceMarker--pending",
+        label: "连接中",
+        pillClass: "connecting",
+        icon,
+      };
+    default:
+      return {
+        className: "amapDeviceMarker--offline",
+        label: "离线",
+        pillClass: "disconnected",
+        icon,
+      };
+  }
+}
+
+function getCompactFieldLabel(name: string) {
+  const trimmed = name.trim();
+  if (trimmed.length <= 8) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 8)}…`;
+}
+
+function getCompactDeviceLabel(name: string) {
+  const normalized = name
+    .replace(/(控制器|网关|设备|终端)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = normalized || name.trim();
+  if (base.length <= 6) {
+    return base;
+  }
+  return `${base.slice(0, 6)}…`;
+}
+
+function buildControllerIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6" y="4" width="12" height="16" rx="2.5"></rect>
+      <path d="M9 2v2M15 2v2M9 20v2M15 20v2"></path>
+      <circle cx="12" cy="9" r="1.6"></circle>
+      <path d="M9.5 13h5M9.5 16h5"></path>
+    </svg>
+  `;
+}
+
+function buildGatewayIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 6a7 7 0 0 1 7 7"></path>
+      <path d="M12 9a4 4 0 0 1 4 4"></path>
+      <path d="M12 3a10 10 0 0 1 10 10"></path>
+      <circle cx="12" cy="16.5" r="2.2"></circle>
+    </svg>
   `;
 }
 

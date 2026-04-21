@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useWorkspace } from "@/components/workspace-provider";
+import type { DeviceSummary } from "@/lib/domain/types";
 import type { FieldSummary, IrrigationPlanSummary, StrategySummary } from "@/lib/domain/workspace";
+
+type BoundaryPoint = [number, number];
 
 type PlanWithDate = IrrigationPlanSummary & {
   nextRunAtMinutes: number;
@@ -35,7 +38,7 @@ type DashboardAmapInstance = {
 
 type DashboardAmapOverlay = {
   setMap?: (target: DashboardAmapInstance) => void;
-  on?: (eventName: string, handler: () => void) => void;
+  on?: (eventName: string, handler: (event?: { lnglat?: { lng: number; lat: number } }) => void) => void;
 };
 
 type DashboardAmapConstructor = {
@@ -49,13 +52,13 @@ type DashboardAmapConstructor = {
     },
   ) => DashboardAmapInstance;
   Marker: new (options: {
-    position: [number, number];
+    position: BoundaryPoint;
     title: string;
     content: string;
     offset?: unknown;
   }) => DashboardAmapOverlay;
   Polygon: new (options: {
-    path: Array<[number, number]>;
+    path: BoundaryPoint[];
     strokeColor: string;
     strokeWeight: number;
     strokeOpacity: number;
@@ -67,7 +70,7 @@ type DashboardAmapConstructor = {
 };
 
 export function DashboardPage() {
-  const { dashboard, fields, plans, strategies } = useWorkspace();
+  const { dashboard, devices, fields, plans, strategies } = useWorkspace();
   const forecastLocation = useMemo(() => getForecastLocation(fields), [fields]);
   const [et0Forecast, setEt0Forecast] = useState<Et0ForecastDay[]>([]);
   const [et0Error, setEt0Error] = useState("");
@@ -158,7 +161,7 @@ export function DashboardPage() {
 
         <article className="workspacePanel dashboardMapPanel">
           <PanelHead title="地块状态地图" to="/map" action="进入地图" />
-          <DashboardAmapOverview fields={fields} fieldRisks={fieldRisks} />
+          <DashboardAmapOverview devices={devices} fields={fields} fieldRisks={fieldRisks} />
         </article>
 
         <div className="dashboardSideColumn">
@@ -203,9 +206,11 @@ export function DashboardPage() {
 }
 
 function DashboardAmapOverview({
+  devices,
   fields,
   fieldRisks,
 }: {
+  devices: DeviceSummary[];
   fields: FieldSummary[];
   fieldRisks: FieldRisk[];
 }) {
@@ -272,15 +277,15 @@ function DashboardAmapOverview({
 
     for (const field of fields) {
       const status = getMapStatus(field, riskById.get(field.id));
-      const color = getDashboardMapColor(status);
+      const fieldPoints = getFieldDisplayPoints(field);
       const polygon = new AMap.Polygon({
-        path: getFieldDisplayPoints(field),
-        strokeColor: color,
+        path: fieldPoints,
+        strokeColor: getDashboardMapColor(status),
         strokeWeight: 2,
-        strokeOpacity: 0.92,
-        fillColor: color,
-        fillOpacity: status === "offline" ? 0.16 : 0.22,
-        zIndex: status === "running" ? 18 : 10,
+        strokeOpacity: 0.94,
+        fillColor: getDashboardMapColor(status),
+        fillOpacity: status === "offline" ? 0.14 : 0.2,
+        zIndex: 8,
       });
       polygon.on?.("click", () => {
         window.location.hash = `#/fields/${field.id}`;
@@ -288,11 +293,44 @@ function DashboardAmapOverview({
       polygon.setMap?.(map);
       overlays.push(polygon);
 
+      for (const [zoneIndex, zone] of getFieldDisplayZones(field).entries()) {
+        const zoneStatus = getZoneMapStatus(field, zoneIndex);
+        const zoneStyle = getDashboardZoneStyle(zoneStatus);
+        const zonePolygon = new AMap.Polygon({
+          path: zone.boundary,
+          strokeColor: zoneStyle.stroke,
+          strokeWeight: zoneStatus === "running" ? 2 : 1,
+          strokeOpacity: 0.92,
+          fillColor: zoneStyle.fill,
+          fillOpacity: zoneStyle.fillOpacity,
+          zIndex: zoneStatus === "running" ? 12 : 10,
+        });
+        zonePolygon.on?.("click", () => {
+          window.location.hash = `#/fields/${field.id}`;
+        });
+        zonePolygon.setMap?.(map);
+        overlays.push(zonePolygon);
+
+        const zoneCenter = calculateDashboardCenter(zone.boundary);
+        const zoneMarker = new AMap.Marker({
+          position: zoneCenter,
+          title: zone.name,
+          content: buildDashboardZoneMarkerContent(zone.name, zoneStatus),
+          offset: new AMap.Pixel(-18, -12),
+        });
+        zoneMarker.on?.("click", () => {
+          window.location.hash = `#/fields/${field.id}`;
+        });
+        zoneMarker.setMap?.(map);
+        overlays.push(zoneMarker);
+      }
+
+      const center = getFieldDisplayCenter(field);
       const fieldMarker = new AMap.Marker({
-        position: [field.centerLng || DEFAULT_ET0_LNG, field.centerLat || DEFAULT_ET0_LAT],
+        position: center,
         title: field.name,
         content: buildDashboardFieldMarkerContent(field, status),
-        offset: new AMap.Pixel(-18, -18),
+        offset: new AMap.Pixel(-42, -14),
       });
       fieldMarker.on?.("click", () => {
         window.location.hash = `#/fields/${field.id}`;
@@ -301,10 +339,13 @@ function DashboardAmapOverview({
       overlays.push(fieldMarker);
 
       for (const marker of field.deviceMarkers ?? []) {
+        const markerMeta = resolveDashboardDeviceMarkerMeta(
+          devices.find((device) => device.id === marker.deviceId),
+        );
         const deviceMarker = new AMap.Marker({
           position: [marker.lng, marker.lat],
           title: marker.name,
-          content: buildDashboardDeviceMarkerContent(marker.name, marker.siteNumber),
+          content: buildDashboardDeviceMarkerContent(marker.name, marker.siteNumber, markerMeta),
           offset: new AMap.Pixel(-14, -28),
         });
         deviceMarker.on?.("click", () => {
@@ -318,42 +359,30 @@ function DashboardAmapOverview({
     if (overlays.length > 0) {
       map.setFitView(overlays);
     }
-  }, [fieldRisks, fields, loadState]);
+  }, [devices, fieldRisks, fields, loadState]);
 
   if (!AMAP_KEY || loadState === "error") {
     return (
       <div className="dashboardMapFallback">
         <FieldStatusMap fields={fields} fieldRisks={fieldRisks} />
-        <div className="mapFallbackNotice">
-          {!AMAP_KEY ? "未配置高德地图 Key，显示状态示意图" : "高德地图加载失败，显示状态示意图"}
-          {AMAP_KEY ? (
-            <button
-              type="button"
-              onClick={() => {
-                dashboardAmapLoadingPromise = null;
-                setLoadState("loading");
-                setReloadKey((key) => key + 1);
-              }}
-            >
-              重新加载
-            </button>
-          ) : null}
-        </div>
       </div>
     );
   }
 
   return (
-    <div className="amapCanvasShell dashboardAmapShell">
-      {loadState === "loading" ? <span className="mapLoading">高德地图加载中...</span> : null}
-      {fields.length === 0 && loadState === "ready" ? (
-        <div className="dashboardMapEmptyOverlay">
-          <strong>暂无地块边界</strong>
-          <p>在地块地图中创建地块后，这里会显示真实地图状态。</p>
-          <Link className="inlineLink" to="/map">去创建地块</Link>
-        </div>
-      ) : null}
-      <div className="amapCanvas" ref={mapRef} />
+    <div className="dashboardMapFrame">
+      <div className="amapCanvasShell dashboardAmapShell">
+        {loadState === "loading" ? <span className="mapLoading">高德地图加载中...</span> : null}
+        {fields.length === 0 && loadState === "ready" ? (
+          <div className="dashboardMapEmptyOverlay">
+            <strong>暂无地块边界</strong>
+            <p>在地块地图中创建地块后，这里会显示真实地图状态。</p>
+            <Link className="inlineLink" to="/map">去创建地块</Link>
+          </div>
+        ) : null}
+        <DashboardMapLegend />
+        <div className="dashboardAmapCanvas" ref={mapRef} />
+      </div>
     </div>
   );
 }
@@ -386,7 +415,7 @@ function FieldStatusMap({
         {displayFields.map((field) => {
           const points = getFieldDisplayPoints(field);
           const polygon = points.map((point) => projectPoint(point, bounds)).join(" ");
-          const center = projectPoint([field.centerLng, field.centerLat], bounds);
+          const center = projectPoint(getFieldDisplayCenter(field), bounds);
           const [centerX, centerY] = center.split(",").map(Number);
           const risk = riskById.get(field.id);
           const status = getMapStatus(field, risk);
@@ -397,6 +426,20 @@ function FieldStatusMap({
               key={field.id}
             >
               <polygon points={polygon} />
+              {getFieldDisplayZones(field).map((zone, zoneIndex) => {
+                const zoneStatus = getZoneMapStatus(field, zoneIndex);
+                if (zoneStatus !== "running") {
+                  return null;
+                }
+                const zonePolygon = zone.boundary.map((point) => projectPoint(point, bounds)).join(" ");
+                return (
+                  <polygon
+                    className={`dashboardMapZone dashboardMapZone--${zoneStatus}`}
+                    key={zone.id}
+                    points={zonePolygon}
+                  />
+                );
+              })}
               <circle cx={centerX} cy={centerY} r="9" />
               <text x={centerX} y={centerY - 16}>
                 {field.name}
@@ -414,7 +457,7 @@ function FieldStatusMap({
       ) : (
         <div className="dashboardMapClickLayer">
           {fields.map((field) => {
-            const center = projectPoint([field.centerLng, field.centerLat], bounds);
+            const center = projectPoint(getFieldDisplayCenter(field), bounds);
             const [left, top] = center.split(",").map(Number);
             return (
               <Link
@@ -431,12 +474,18 @@ function FieldStatusMap({
           })}
         </div>
       )}
-      <div className="dashboardMapLegend">
-        <span><i className="legendDot legendDot--idle" />正常</span>
-        <span><i className="legendDot legendDot--running" />灌溉中</span>
-        <span><i className="legendDot legendDot--attention" />需关注</span>
-        <span><i className="legendDot legendDot--offline" />离线</span>
-      </div>
+      <DashboardMapLegend />
+    </div>
+  );
+}
+
+function DashboardMapLegend() {
+  return (
+    <div className="dashboardMapLegend">
+      <span><i className="legendDot legendDot--idle" />正常</span>
+      <span><i className="legendDot legendDot--running" />灌溉中</span>
+      <span><i className="legendDot legendDot--attention" />需关注</span>
+      <span><i className="legendDot legendDot--offline" />离线</span>
     </div>
   );
 }
@@ -727,6 +776,27 @@ function getFieldDisplayPoints(field: FieldSummary): Array<[number, number]> {
   ];
 }
 
+function getFieldDisplayCenter(field: FieldSummary): [number, number] {
+  const lng = Number.isFinite(field.centerLng) ? field.centerLng : DEFAULT_ET0_LNG;
+  const lat = Number.isFinite(field.centerLat) ? field.centerLat : DEFAULT_ET0_LAT;
+  return [lng, lat];
+}
+
+function getFieldDisplayZones(field: FieldSummary) {
+  return (field.mapZones ?? []).filter(
+    (zone): zone is NonNullable<FieldSummary["mapZones"]>[number] =>
+      Array.isArray(zone.boundary) &&
+      zone.boundary.length >= 3 &&
+      zone.boundary.every(
+        (point) =>
+          Array.isArray(point) &&
+          point.length >= 2 &&
+          Number.isFinite(point[0]) &&
+          Number.isFinite(point[1]),
+      ),
+  );
+}
+
 function projectPoint(point: [number, number], bounds: ReturnType<typeof getFieldBounds>) {
   const width = Math.max(bounds.maxLng - bounds.minLng, 0.0001);
   const height = Math.max(bounds.maxLat - bounds.minLat, 0.0001);
@@ -754,14 +824,20 @@ function formatShortDate(date: string) {
 }
 
 function loadDashboardAmap() {
-  if (window.AMap) {
-    return Promise.resolve(window.AMap as unknown as DashboardAmapConstructor);
+  const dashboardWindow = window as Window & {
+    AMap?: DashboardAmapConstructor;
+    _AMapSecurityConfig?: {
+      securityJsCode?: string;
+    };
+  };
+  if (dashboardWindow.AMap) {
+    return Promise.resolve(dashboardWindow.AMap);
   }
   if (dashboardAmapLoadingPromise) {
     return dashboardAmapLoadingPromise;
   }
   if (AMAP_SECURITY_CODE) {
-    window._AMapSecurityConfig = {
+    dashboardWindow._AMapSecurityConfig = {
       securityJsCode: AMAP_SECURITY_CODE,
     };
   }
@@ -770,8 +846,8 @@ function loadDashboardAmap() {
     script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(AMAP_KEY)}`;
     script.async = true;
     script.onload = () => {
-      if (window.AMap) {
-        resolve(window.AMap as unknown as DashboardAmapConstructor);
+      if (dashboardWindow.AMap) {
+        resolve(dashboardWindow.AMap);
       } else {
         reject(new Error("高德地图初始化失败"));
       }
@@ -795,22 +871,95 @@ function getDashboardMapColor(status: ReturnType<typeof getMapStatus>) {
   }
 }
 
+function getZoneMapStatus(field: FieldSummary, zoneIndex: number) {
+  if (field.irrigationState === "running") {
+    return zoneIndex === 0 ? "running" : "idle";
+  }
+  return "idle";
+}
+
+function getDashboardZoneStyle(status: ReturnType<typeof getZoneMapStatus>) {
+  switch (status) {
+    case "running":
+      return {
+        fill: "#0ea5e9",
+        stroke: "#0284c7",
+        fillOpacity: 0.56,
+      };
+    default:
+      return {
+        fill: "#86efac",
+        stroke: "#15803d",
+        fillOpacity: 0.46,
+      };
+  }
+}
+
+function calculateDashboardCenter(boundary: BoundaryPoint[]): BoundaryPoint {
+  if (boundary.length === 0) {
+    return [DEFAULT_ET0_LNG, DEFAULT_ET0_LAT];
+  }
+  const sum = boundary.reduce(
+    (acc, point) => {
+      acc.lng += point[0];
+      acc.lat += point[1];
+      return acc;
+    },
+    { lng: 0, lat: 0 },
+  );
+  return [
+    Number((sum.lng / boundary.length).toFixed(6)),
+    Number((sum.lat / boundary.length).toFixed(6)),
+  ];
+}
+
 function buildDashboardFieldMarkerContent(field: FieldSummary, status: ReturnType<typeof getMapStatus>) {
   return `
-    <div class="amapFieldMarker amapFieldMarker--${field.irrigationState} dashboardAmapMarker dashboardAmapMarker--${status}">
-      <span>${escapeHtml(field.code)}</span>
-      <strong>${escapeHtml(field.name)}</strong>
+    <div class="amapFieldMarker dashboardAmapMarker dashboardAmapMarker--${status}">
+      <strong>${escapeHtml(getDashboardCompactFieldLabel(field.name))}</strong>
     </div>
   `;
 }
 
-function buildDashboardDeviceMarkerContent(name: string, siteNumber?: number) {
+function buildDashboardZoneMarkerContent(name: string, status: ReturnType<typeof getZoneMapStatus>) {
   return `
-    <div class="amapDeviceMarker" title="${escapeHtml(name)}">
-      <span></span>
-      <strong>${escapeHtml(name)}${siteNumber ? ` · ${siteNumber}站` : ""}</strong>
+    <div class="amapZoneMarker${status === "running" ? " dashboardZoneMarker--running" : ""}">
+      ${escapeHtml(name)}
     </div>
   `;
+}
+
+function buildDashboardDeviceMarkerContent(
+  name: string,
+  siteNumber: number | undefined,
+  meta: { className: string; icon: string },
+) {
+  return `
+    <div class="amapDeviceMarker ${meta.className}" title="${escapeHtml(name)}">
+      <span>${meta.icon}</span>
+      <strong>${escapeHtml(getDashboardCompactDeviceLabel(name))}${siteNumber ? ` · ${siteNumber}站` : ""}</strong>
+    </div>
+  `;
+}
+
+function resolveDashboardDeviceMarkerMeta(device?: DeviceSummary) {
+  const icon = device?.isGateway ? buildDashboardGatewayIcon() : buildDashboardControllerIcon();
+  if (device?.isGateway) {
+    return {
+      className: device.gatewayState === "online" ? "amapDeviceMarker--online" : "amapDeviceMarker--offline",
+      icon,
+    };
+  }
+  switch (device?.bleConnectivityState ?? device?.connectivityState) {
+    case "connected":
+      return { className: "amapDeviceMarker--online", icon };
+    case "error":
+      return { className: "amapDeviceMarker--error", icon };
+    case "connecting":
+      return { className: "amapDeviceMarker--pending", icon };
+    default:
+      return { className: "amapDeviceMarker--offline", icon };
+  }
 }
 
 function escapeHtml(value: string) {
@@ -820,6 +969,42 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function getDashboardCompactFieldLabel(name: string) {
+  const trimmed = name.trim();
+  return trimmed.length <= 8 ? trimmed : `${trimmed.slice(0, 8)}…`;
+}
+
+function getDashboardCompactDeviceLabel(name: string) {
+  const normalized = name
+    .replace(/(控制器|网关|设备|终端)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = normalized || name.trim();
+  return base.length <= 6 ? base : `${base.slice(0, 6)}…`;
+}
+
+function buildDashboardControllerIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6" y="4" width="12" height="16" rx="2.5"></rect>
+      <path d="M9 2v2M15 2v2M9 20v2M15 20v2"></path>
+      <circle cx="12" cy="9" r="1.6"></circle>
+      <path d="M9.5 13h5M9.5 16h5"></path>
+    </svg>
+  `;
+}
+
+function buildDashboardGatewayIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 6a7 7 0 0 1 7 7"></path>
+      <path d="M12 9a4 4 0 0 1 4 4"></path>
+      <path d="M12 3a10 10 0 0 1 10 10"></path>
+      <circle cx="12" cy="16.5" r="2.2"></circle>
+    </svg>
+  `;
 }
 
 function PanelHead({ title, to, action }: { title: string; to: string; action: string }) {
