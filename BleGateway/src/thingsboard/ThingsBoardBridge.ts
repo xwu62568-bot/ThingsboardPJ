@@ -92,6 +92,7 @@ export class ThingsBoardBridge {
     string,
     {
       blePeripheralId?: string;
+      displayName: string;
       selectedSiteNumber: number;
       siteCount: number;
       lastConnectionUpdateTs: number;
@@ -255,21 +256,23 @@ export class ThingsBoardBridge {
       });
 
       for (const session of sessions) {
-        const deviceName = session.deviceName?.trim();
-        if (!deviceName) {
+        const displayName = session.deviceName?.trim();
+        if (!displayName) {
           continue;
         }
-        const deviceContext = this.getOrCreateDeviceContext(deviceName);
+        const deviceKey = this.buildChildDeviceKey(session.deviceId);
+        const deviceContext = this.getOrCreateDeviceContext(deviceKey, displayName);
         deviceContext.blePeripheralId = session.deviceId;
         const connected = session.connectionState === 'connected';
         if (connected) {
-          this.connectedChildDevices.set(session.deviceId, deviceName);
-          await this.client.connectChildDevice(deviceName);
+          this.connectedChildDevices.set(session.deviceId, deviceKey);
+          await this.client.connectChildDevice(deviceKey);
         } else {
           this.connectedChildDevices.delete(session.deviceId);
-          await this.client.disconnectChildDevice(deviceName);
+          await this.client.disconnectChildDevice(deviceKey);
         }
-        await this.client.publishChildAttributes(deviceName, {
+        await this.client.publishChildAttributes(deviceKey, {
+          displayName: deviceContext.displayName,
           bleConnectionState: session.connectionState,
           bleConnected: connected,
           connectionStateText: this.getConnectionStateText(
@@ -277,7 +280,7 @@ export class ThingsBoardBridge {
             session.lastError?.message,
           ),
           connectedDeviceId: connected ? session.deviceId : '',
-          connectedDeviceName: connected ? deviceName : '',
+          connectedDeviceName: connected ? deviceContext.displayName : '',
           bleLastError: session.lastError?.message ?? '',
           blePeripheralId: session.deviceId,
           selectedSiteNumber: deviceContext.selectedSiteNumber,
@@ -612,16 +615,19 @@ export class ThingsBoardBridge {
       connectedDeviceId: activeDevice.deviceId,
     });
     commandHexes.push(bytesToHex(onOffBytes));
-    await this.client.publishChildTelemetry(activeDevice.deviceName, {
+    const deviceKey = this.buildChildDeviceKey(activeDevice.deviceId);
+    await this.client.publishChildTelemetry(deviceKey, {
       ts: Date.now(),
       values: {
+        displayName: activeDevice.deviceName,
         lastValveSiteNumber: request.siteNumber,
         lastValveCommand: open ? 'open' : 'close',
         lastValveStationId: request.stationId,
       },
     });
     await this.publishRpcValveControlState({
-      deviceName: activeDevice.deviceName,
+      deviceName: deviceKey,
+      displayName: activeDevice.deviceName,
       siteNumber: request.siteNumber,
       open,
       manualDurationSeconds: request.manualDurationSeconds,
@@ -745,33 +751,36 @@ export class ThingsBoardBridge {
       throw new Error(`BLE connect did not reach connected state for ${device.name ?? fallbackName}`);
     }
 
-    const deviceName = device.name ?? fallbackName;
-    const deviceContext = this.getOrCreateDeviceContext(deviceName);
+    const displayName = device.name ?? fallbackName;
+    const deviceKey = this.buildChildDeviceKey(device.id);
+    const deviceContext = this.getOrCreateDeviceContext(deviceKey, displayName);
     deviceContext.blePeripheralId = device.id;
     deviceContext.lastConnectionUpdateTs = Date.now();
-    deviceContext.siteCount = this.resolveDeviceSiteCount(deviceName, undefined, deviceContext.siteCount);
-    this.connectedChildDevices.set(device.id, deviceName);
-    await this.client.connectChildDevice(deviceName);
+    deviceContext.siteCount = this.resolveDeviceSiteCount(displayName, undefined, deviceContext.siteCount);
+    this.connectedChildDevices.set(device.id, deviceKey);
+    await this.client.connectChildDevice(deviceKey);
 
     console.log('[TB-BRIDGE] ble device connected', {
       deviceId: device.id,
-      deviceName,
+      deviceName: displayName,
+      deviceKey,
     });
     await this.client.publishAttributes({
-      targetDeviceName: deviceName,
+      targetDeviceName: deviceKey,
       targetDeviceId: device.id,
       selectedSiteNumber: deviceContext.selectedSiteNumber,
       siteCount: deviceContext.siteCount,
     });
     await this.syncChildBleState(
       device.id,
-      deviceName,
+      deviceKey,
       {
+        displayName: deviceContext.displayName,
         bleConnectionState: 'connected',
         bleConnected: true,
         connectionStateText: '已连接',
         connectedDeviceId: device.id,
-        connectedDeviceName: deviceName,
+        connectedDeviceName: deviceContext.displayName,
         bleLastError: '',
         blePeripheralId: device.id,
       },
@@ -816,35 +825,38 @@ export class ThingsBoardBridge {
     );
 
     for (const session of activeSessions) {
-      const deviceName = session.deviceName?.trim();
-      if (!deviceName) {
+      const displayName = session.deviceName?.trim();
+      if (!displayName) {
         continue;
       }
 
-      const deviceContext = this.getOrCreateDeviceContext(deviceName);
+      const deviceKey = this.buildChildDeviceKey(session.deviceId);
+      const deviceContext = this.getOrCreateDeviceContext(deviceKey, displayName);
       deviceContext.blePeripheralId = session.deviceId;
       deviceContext.lastConnectionUpdateTs = Date.now();
-      this.connectedChildDevices.set(session.deviceId, deviceName);
+      this.connectedChildDevices.set(session.deviceId, deviceKey);
 
       console.log('[TB-BRIDGE] reconnect child after mqtt reconnect', {
         deviceId: session.deviceId,
-        deviceName,
+        deviceName: displayName,
+        deviceKey,
         siteCount: deviceContext.siteCount,
       });
 
-      if (this.connectedChildDevices.get(session.deviceId) !== deviceName) {
-        await this.client.connectChildDevice(deviceName);
+      if (this.connectedChildDevices.get(session.deviceId) !== deviceKey) {
+        await this.client.connectChildDevice(deviceKey);
       }
       await this.client.publishAttributes({
-        targetDeviceName: deviceName,
+        targetDeviceName: deviceKey,
         targetDeviceId: session.deviceId,
         selectedSiteNumber: deviceContext.selectedSiteNumber,
         siteCount: deviceContext.siteCount,
       });
       await this.syncChildBleState(
         session.deviceId,
-        deviceName,
+        deviceKey,
         {
+          displayName: deviceContext.displayName,
           bleConnectionState: session.connectionState,
           bleConnected: true,
           connectionStateText: this.getConnectionStateText(
@@ -852,7 +864,7 @@ export class ThingsBoardBridge {
             session.lastError?.message,
           ),
           connectedDeviceId: session.deviceId,
-          connectedDeviceName: deviceName,
+          connectedDeviceName: deviceContext.displayName,
           bleLastError: session.lastError?.message ?? '',
           reconnectAttempts: session.reconnectAttempts,
           selectedSiteNumber: deviceContext.selectedSiteNumber,
@@ -869,12 +881,13 @@ export class ThingsBoardBridge {
   ): Promise<{ deviceId: string; deviceName: string }> {
     const connectedSession = this.getConnectedDevice(deviceName);
     if (connectedSession && connectedSession.connectionState === 'connected') {
-      const resolvedDeviceName =
+      const resolvedDeviceKey = this.buildChildDeviceKey(connectedSession.deviceId);
+      const resolvedDisplayName =
         connectedSession.deviceName?.trim() || deviceName || connectedSession.deviceId;
-      this.connectedChildDevices.set(connectedSession.deviceId, resolvedDeviceName);
+      this.connectedChildDevices.set(connectedSession.deviceId, resolvedDeviceKey);
       return {
         deviceId: connectedSession.deviceId,
-        deviceName: resolvedDeviceName,
+        deviceName: resolvedDisplayName,
       };
     }
 
@@ -894,11 +907,19 @@ export class ThingsBoardBridge {
   }
 
   private async resolveDevice(deviceName: string, deviceIdHint?: string) {
+    const targetContext = this.getDeviceContextEntry(deviceName)?.context;
     let device =
       (deviceIdHint
         ? this.bleStore.getState().devices.find((item) => item.id === deviceIdHint)
         : undefined) ??
-      this.bleStore.getState().devices.find((item) => item.name === deviceName);
+      (targetContext?.blePeripheralId
+        ? this.bleStore.getState().devices.find((item) => item.id === targetContext.blePeripheralId)
+        : undefined) ??
+      (this.looksLikePeripheralId(deviceName)
+        ? this.bleStore.getState().devices.find((item) => item.id === deviceName)
+        : undefined) ??
+      this.bleStore.getState().devices.find((item) => item.name === deviceName) ??
+      this.bleStore.getState().devices.find((item) => item.name === targetContext?.displayName);
     if (!device) {
       console.log('[TB-BRIDGE] target device not in cache, manual scan required', {
         deviceName,
@@ -914,14 +935,15 @@ export class ThingsBoardBridge {
   private getConnectedDevice(deviceName?: string) {
     const state = this.bleStore.getState();
     if (deviceName) {
-      const context = this.deviceContexts.get(deviceName);
+      const context = this.getDeviceContextEntry(deviceName)?.context;
       if (context?.blePeripheralId && state.sessions[context.blePeripheralId]) {
         return state.sessions[context.blePeripheralId];
       }
       const namedSession = Object.values(state.sessions).find(
         (session) =>
           session.connectionState === 'connected' &&
-          session.deviceName?.trim() === deviceName,
+          (session.deviceName?.trim() === deviceName ||
+            this.buildChildDeviceKey(session.deviceId) === deviceName),
       );
       if (namedSession) {
         return namedSession;
@@ -929,7 +951,12 @@ export class ThingsBoardBridge {
       const device =
         (context?.blePeripheralId
           ? state.devices.find((item) => item.id === context.blePeripheralId)
-          : undefined) ?? state.devices.find((item) => item.name === deviceName);
+          : undefined) ??
+        (this.looksLikePeripheralId(deviceName)
+          ? state.devices.find((item) => item.id === deviceName)
+          : undefined) ??
+        state.devices.find((item) => item.name === deviceName) ??
+        state.devices.find((item) => item.name === context?.displayName);
       if (!device) {
         return undefined;
       }
@@ -1055,10 +1082,14 @@ export class ThingsBoardBridge {
       return;
     }
     this.lastChildBleSnapshots.set(deviceId, snapshot);
-    const deviceContext = this.getOrCreateDeviceContext(deviceName);
+    const deviceContext = this.getOrCreateDeviceContext(
+      deviceName,
+      typeof values.displayName === 'string' ? values.displayName : undefined,
+    );
     deviceContext.lastConnectionUpdateTs = Date.now();
     console.log('[TB-BRIDGE] sync child ble state', { deviceName, values });
     await this.client.publishChildAttributes(deviceName, {
+      displayName: deviceContext.displayName,
       ...values,
       lastConnectionUpdateTs: deviceContext.lastConnectionUpdateTs,
       blePeripheralId: deviceContext.blePeripheralId ?? deviceId,
@@ -1071,14 +1102,16 @@ export class ThingsBoardBridge {
 
   private async syncAllChildBleStates(state: ReturnType<BleStore['getState']>): Promise<void> {
     for (const session of Object.values(state.sessions)) {
-      const deviceName = session.deviceName?.trim();
-      if (!deviceName) {
+      const displayName = session.deviceName?.trim();
+      if (!displayName) {
         continue;
       }
+      const deviceKey = this.buildChildDeviceKey(session.deviceId);
       await this.syncChildBleState(
         session.deviceId,
-        deviceName,
+        deviceKey,
         {
+          displayName,
           bleConnectionState: session.connectionState,
           bleConnected: session.connectionState === 'connected',
           connectionStateText: this.getConnectionStateText(
@@ -1086,7 +1119,7 @@ export class ThingsBoardBridge {
             session.lastError?.message,
           ),
           connectedDeviceId: session.connectionState === 'connected' ? session.deviceId : '',
-          connectedDeviceName: session.connectionState === 'connected' ? deviceName : '',
+          connectedDeviceName: session.connectionState === 'connected' ? displayName : '',
           bleLastError: session.lastError?.message ?? '',
           reconnectAttempts: session.reconnectAttempts,
         },
@@ -1119,10 +1152,9 @@ export class ThingsBoardBridge {
 
   private async handleNotify(peripheralId: string, bytes: number[]): Promise<void> {
     console.log('[TB-BRIDGE] notify bytes', { peripheralId, bytesHex: bytesToHex(bytes) });
-    const deviceName =
-      this.connectedChildDevices.get(peripheralId) ??
-      this.bleStore.getState().sessions[peripheralId]?.deviceName?.trim();
-    const deviceContext = deviceName ? this.getOrCreateDeviceContext(deviceName) : undefined;
+    const deviceName = this.connectedChildDevices.get(peripheralId) ?? this.buildChildDeviceKey(peripheralId);
+    const displayName = this.bleStore.getState().sessions[peripheralId]?.deviceName?.trim();
+    const deviceContext = this.getOrCreateDeviceContext(deviceName, displayName);
     const packetBytes = this.consumeNotifyPackets(peripheralId, bytes);
     if (packetBytes.length === 0) {
       console.log('[TB-BRIDGE] notify buffered partial packet', { peripheralId });
@@ -1137,7 +1169,7 @@ export class ThingsBoardBridge {
       }
       console.log('[TB-BRIDGE] command response', {
         peripheralId,
-        deviceName: meta?.deviceName ?? deviceName,
+        deviceName: meta?.deviceName ?? deviceContext.displayName,
         type: meta?.type,
         siteNumber: meta?.siteNumber,
         open: meta?.open,
@@ -1146,7 +1178,7 @@ export class ThingsBoardBridge {
         statusText: this.describeCommandStatus(meta?.type, response.status),
         packetHex: response.packetHex,
       });
-      this.maybeAlertCommandFailure(meta?.deviceName ?? deviceName, meta?.type, response.status);
+      this.maybeAlertCommandFailure(meta?.deviceName ?? deviceContext.displayName, meta?.type, response.status);
     }
 
     const packets = decodeIncomingPackets(packetBytes, deviceContext?.selectedSiteNumber ?? 1);
@@ -1160,7 +1192,8 @@ export class ThingsBoardBridge {
     for (const packet of packets) {
       const values = {
         ...packet.telemetry,
-        selectedSiteNumber: deviceContext?.selectedSiteNumber ?? 1,
+        displayName: deviceContext.displayName,
+        selectedSiteNumber: deviceContext.selectedSiteNumber ?? 1,
       };
       this.client.setLatestGatewayValues(packet.packetHex, values, { deviceName });
       console.log('[TB-BRIDGE] publish parsed device telemetry', values);
@@ -1502,7 +1535,9 @@ export class ThingsBoardBridge {
     }
 
     const connectedSession = this.getConnectedDevice();
-    const sessionTarget = connectedSession?.deviceName?.trim();
+    const sessionTarget = connectedSession
+      ? this.buildChildDeviceKey(connectedSession.deviceId)
+      : '';
     return sessionTarget || undefined;
   }
 
@@ -1542,7 +1577,10 @@ export class ThingsBoardBridge {
       return;
     }
     console.log('[TB-BRIDGE] gateway attribute control', payload);
-    const deviceContext = this.getOrCreateDeviceContext(deviceName);
+    const deviceContext = this.getOrCreateDeviceContext(
+      deviceName,
+      typeof payload.data.displayName === 'string' ? payload.data.displayName.trim() : undefined,
+    );
     const blePeripheralId = this.parsePeripheralIdentifier(payload.data);
     if (blePeripheralId) {
       deviceContext.blePeripheralId = blePeripheralId;
@@ -1570,6 +1608,7 @@ export class ThingsBoardBridge {
         lastControlAppliedAt: Date.now(),
       });
       await this.client.publishChildAttributes(deviceName, {
+        displayName: deviceContext.displayName,
         manualDurationSeconds,
         blePeripheralId: deviceContext.blePeripheralId ?? '',
       });
@@ -1578,6 +1617,7 @@ export class ThingsBoardBridge {
 
   private async publishRpcValveControlState(params: {
     deviceName: string;
+    displayName?: string;
     siteNumber: number;
     open: boolean;
     manualDurationSeconds?: number;
@@ -1595,7 +1635,10 @@ export class ThingsBoardBridge {
       lastControlAppliedAt: now,
     };
     await this.client.publishAttributes(values);
-    await this.client.publishChildAttributes(params.deviceName, values);
+    await this.client.publishChildAttributes(params.deviceName, {
+      displayName: params.displayName ?? params.deviceName,
+      ...values,
+    });
   }
 
   private async applyGatewayDesiredConnection(
@@ -1620,21 +1663,6 @@ export class ThingsBoardBridge {
     });
   }
 
-  private getOrCreateDeviceContext(deviceName: string) {
-    const existing = this.deviceContexts.get(deviceName);
-    if (existing) {
-      return existing;
-    }
-    const created = {
-      blePeripheralId: undefined as string | undefined,
-      selectedSiteNumber: 1,
-      siteCount: this.inferSiteCountFromDeviceName(deviceName),
-      lastConnectionUpdateTs: Date.now(),
-    };
-    this.deviceContexts.set(deviceName, created);
-    return created;
-  }
-
   private resolveDeviceSiteCount(
     deviceName: string,
     values?: Record<string, unknown>,
@@ -1647,7 +1675,7 @@ export class ThingsBoardBridge {
       return explicitSiteCount;
     }
 
-    const current = fallback ?? this.deviceContexts.get(deviceName)?.siteCount;
+    const current = fallback ?? this.getDeviceContextEntry(deviceName)?.context.siteCount;
     if (current && current > 1) {
       return current;
     }
@@ -1692,6 +1720,57 @@ export class ThingsBoardBridge {
       }
     }
     return undefined;
+  }
+
+  private buildChildDeviceKey(peripheralId: string): string {
+    return `ble-${peripheralId.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}`;
+  }
+
+  private getDeviceContextEntry(target: string) {
+    const normalizedTarget = target.trim();
+    if (!normalizedTarget) {
+      return undefined;
+    }
+    const direct = this.deviceContexts.get(normalizedTarget);
+    if (direct) {
+      return { key: normalizedTarget, context: direct };
+    }
+    const byPeripheral = this.deviceContexts.get(this.buildChildDeviceKey(normalizedTarget));
+    if (byPeripheral) {
+      return { key: this.buildChildDeviceKey(normalizedTarget), context: byPeripheral };
+    }
+    for (const [key, context] of this.deviceContexts.entries()) {
+      if (
+        context.displayName === normalizedTarget ||
+        context.blePeripheralId === normalizedTarget
+      ) {
+        return { key, context };
+      }
+    }
+    return undefined;
+  }
+
+  private getOrCreateDeviceContext(deviceKey: string, displayName?: string) {
+    const existingEntry = this.getDeviceContextEntry(deviceKey);
+    if (existingEntry) {
+      if (displayName) {
+        existingEntry.context.displayName = displayName;
+      }
+      return existingEntry.context;
+    }
+    const created = {
+      blePeripheralId: this.looksLikePeripheralId(deviceKey) ? deviceKey : undefined,
+      displayName: displayName || deviceKey,
+      selectedSiteNumber: 1,
+      siteCount: this.inferSiteCountFromDeviceName(displayName || deviceKey),
+      lastConnectionUpdateTs: Date.now(),
+    };
+    this.deviceContexts.set(deviceKey, created);
+    return created;
+  }
+
+  private looksLikePeripheralId(value: string): boolean {
+    return /^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$/i.test(value.trim());
   }
 }
 

@@ -98,6 +98,7 @@ type ZoneFormState = {
   deviceBindings: Array<{
     deviceId: string;
     siteNumber: string;
+    rpcTargetName?: string;
     lng?: number;
     lat?: number;
   }>;
@@ -138,6 +139,7 @@ export function MapPage() {
           return {
             deviceId: binding.deviceId,
             name: device?.name ?? "现场设备",
+            rpcTargetName: device?.rpcTargetName,
             role: device?.isGateway ? "gateway" : "controller",
             lng: binding.lng,
             lat: binding.lat,
@@ -676,13 +678,14 @@ function AmapFieldCanvas({
       }
 
       for (const deviceMarker of field.deviceMarkers ?? []) {
+        const displayName = resolveMapDeviceMarkerName(deviceMarker, devices);
         const markerMeta = resolveDeviceMarkerMeta(
           devices.find((device) => device.id === deviceMarker.deviceId),
         );
         const marker = new AMap.Marker({
           position: [deviceMarker.lng, deviceMarker.lat],
-          title: deviceMarker.name,
-          content: buildDeviceMarkerContent(deviceMarker, markerMeta),
+          title: displayName,
+          content: buildDeviceMarkerContent({ ...deviceMarker, name: displayName }, markerMeta),
           offset: new AMap.Pixel(-14, -28),
           draggable: false,
         });
@@ -1087,14 +1090,20 @@ function ZoneCreatePanel({
             value=""
             onChange={(event) => {
               if (event.target.value) {
-                addZoneDeviceBinding(setForm, event.target.value, draftBoundary);
+                const device = devices.find((item) => item.id === event.target.value);
+                addZoneDeviceBinding(
+                  setForm,
+                  event.target.value,
+                  draftBoundary,
+                  device?.rpcTargetName,
+                );
               }
             }}
           >
             <option value="">选择设备</option>
             {devices.map((device) => (
               <option key={device.id} value={device.id}>
-                {device.name}
+                {formatDeviceChoiceLabel(device)}
               </option>
             ))}
           </select>
@@ -1109,7 +1118,7 @@ function ZoneCreatePanel({
               return (
                 <div className="zoneDeviceRow side" key={binding.deviceId}>
                   <div className="zoneDeviceRowHead">
-                    <strong>{device?.name ?? binding.deviceId}</strong>
+                    <strong>{device ? formatDeviceChoiceLabel(device) : shortenDeviceIdentity(binding.deviceId)}</strong>
                     <span className={`statusPill ${markerMeta.pillClass}`}>{markerMeta.label}</span>
                   </div>
                   <label>
@@ -1362,6 +1371,7 @@ function buildFieldSummaryFromConfig(
     zoneCount: config.zoneCount ?? fallbackField.zoneCount,
     kc: config.kc ?? fallbackField.kc,
     batteryLevel: device?.batteryLevel ?? fallbackField.batteryLevel,
+    irrigationState: "idle",
     gatewayState: device?.gatewayState ?? fallbackField.gatewayState,
   };
 }
@@ -1377,6 +1387,7 @@ function buildUpdatedFieldConfigForZone(
   const deviceBindings = zoneForm.deviceBindings.map((binding) => ({
     deviceId: binding.deviceId,
     siteNumber: Math.max(1, Math.round(parseOptionalNumber(binding.siteNumber) ?? 1)),
+    rpcTargetName: binding.rpcTargetName,
     lng: binding.lng,
     lat: binding.lat,
   }));
@@ -1520,6 +1531,9 @@ function buildZoneDeviceMarkers(zone: FieldZone, devices: DeviceSummary[]): Devi
     return {
       deviceId: binding.deviceId,
       name: device?.name ?? `设备${index + 1}`,
+      rpcTargetName:
+        device?.rpcTargetName ??
+        ("rpcTargetName" in binding ? binding.rpcTargetName : undefined),
       role: device?.isGateway ? "gateway" : "controller",
       lng: Number(((typeof binding.lng === "number" ? binding.lng : center[0] + Math.cos(angle) * radiusLng)).toFixed(6)),
       lat: Number(((typeof binding.lat === "number" ? binding.lat : center[1] + Math.sin(angle) * radiusLat)).toFixed(6)),
@@ -1597,6 +1611,7 @@ function addZoneDeviceBinding(
   setForm: Dispatch<SetStateAction<ZoneFormState>>,
   deviceId: string,
   boundary: BoundaryPoint[],
+  rpcTargetName?: string,
 ) {
   setForm((current) => {
     if (current.deviceBindings.some((binding) => binding.deviceId === deviceId)) {
@@ -1611,6 +1626,7 @@ function addZoneDeviceBinding(
         {
           deviceId,
           siteNumber: "1",
+          rpcTargetName,
           lng: defaultPosition[0],
           lat: defaultPosition[1],
         },
@@ -1767,6 +1783,31 @@ function buildDeviceMarkerContent(
   `;
 }
 
+function resolveMapDeviceMarkerName(marker: DeviceMarker, devices: DeviceSummary[]) {
+  const liveName = devices.find((item) => item.id === marker.deviceId)?.name?.trim();
+  if (liveName) {
+    return liveName;
+  }
+  const markerName = marker.name?.trim();
+  if (markerName && !looksLikeMapPlaceholderName(markerName)) {
+    return markerName;
+  }
+  return `设备 ${shortMapDeviceIdentity(marker.deviceId)}`;
+}
+
+function looksLikeMapPlaceholderName(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "default" || normalized === "device" || normalized === "现场设备" || normalized.startsWith("ble-");
+}
+
+function shortMapDeviceIdentity(value: string) {
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!normalized) {
+    return "未识别";
+  }
+  return normalized.length <= 6 ? normalized : normalized.slice(-6);
+}
+
 function resolveDeviceMarkerMeta(device?: DeviceSummary) {
   const icon = device?.isGateway ? buildGatewayIcon() : buildControllerIcon();
   if (device?.isGateway) {
@@ -1837,6 +1878,21 @@ function getCompactDeviceLabel(name: string) {
     return base;
   }
   return `${base.slice(0, 6)}…`;
+}
+
+function formatDeviceChoiceLabel(device: DeviceSummary) {
+  return `${device.name} · ${shortenDeviceIdentity(device.blePeripheralId || device.id)}`;
+}
+
+function shortenDeviceIdentity(value: string) {
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!normalized) {
+    return "未识别";
+  }
+  if (normalized.length <= 6) {
+    return normalized;
+  }
+  return normalized.slice(-6);
 }
 
 function buildControllerIcon() {

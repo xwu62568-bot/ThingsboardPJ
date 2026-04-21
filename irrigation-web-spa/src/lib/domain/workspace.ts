@@ -340,12 +340,12 @@ function normalizeFieldGatewayState(value: unknown, device?: DeviceSummary): Gat
 
 function normalizeIrrigationState(
   value: unknown,
-  soilMoisture: number,
+  _soilMoisture: number,
 ): FieldSummary["irrigationState"] {
   if (value === "idle" || value === "running" || value === "attention") {
     return value;
   }
-  return soilMoisture > 0 && soilMoisture < 32 ? "attention" : "idle";
+  return "idle";
 }
 
 function normalizeRotationPlans(value: unknown): TbRotationPlanConfig[] {

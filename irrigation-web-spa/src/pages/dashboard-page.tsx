@@ -467,13 +467,14 @@ function DashboardAmapOverview({
       overlays.push(fieldMarker);
 
       for (const marker of field.deviceMarkers ?? []) {
+        const displayName = resolveDashboardDeviceMarkerName(marker, devices);
         const markerMeta = resolveDashboardDeviceMarkerMeta(
           devices.find((device) => device.id === marker.deviceId),
         );
         const deviceMarker = new AMap.Marker({
           position: [marker.lng, marker.lat],
-          title: marker.name,
-          content: buildDashboardDeviceMarkerContent(marker.name, marker.siteNumber, markerMeta),
+          title: displayName,
+          content: buildDashboardDeviceMarkerContent(displayName, marker.siteNumber, markerMeta),
           offset: new AMap.Pixel(-14, -28),
         });
         deviceMarker.on?.("click", () => {
@@ -1105,7 +1106,7 @@ function getMapStatus(field: FieldSummary, risk?: FieldRisk) {
   if (field.irrigationState === "running") {
     return "running";
   }
-  if (field.irrigationState === "attention" || risk?.riskLevel === "高" || risk?.riskLevel === "中") {
+  if (field.irrigationState === "attention") {
     return "attention";
   }
   return "idle";
@@ -1276,6 +1277,34 @@ function getDashboardCompactDeviceLabel(name: string) {
     .trim();
   const base = normalized || name.trim();
   return base.length <= 6 ? base : `${base.slice(0, 6)}…`;
+}
+
+function resolveDashboardDeviceMarkerName(
+  marker: NonNullable<FieldSummary["deviceMarkers"]>[number],
+  devices: DeviceSummary[],
+) {
+  const liveName = devices.find((item) => item.id === marker.deviceId)?.name?.trim();
+  if (liveName) {
+    return liveName;
+  }
+  const markerName = marker.name?.trim();
+  if (markerName && !looksLikeDashboardPlaceholderName(markerName)) {
+    return markerName;
+  }
+  return `设备 ${shortDashboardDeviceIdentity(marker.deviceId)}`;
+}
+
+function looksLikeDashboardPlaceholderName(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "default" || normalized === "device" || normalized === "现场设备" || normalized.startsWith("ble-");
+}
+
+function shortDashboardDeviceIdentity(value: string) {
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!normalized) {
+    return "未识别";
+  }
+  return normalized.length <= 6 ? normalized : normalized.slice(-6);
 }
 
 function buildDashboardControllerIcon() {

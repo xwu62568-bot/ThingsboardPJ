@@ -28,6 +28,7 @@ export type SiteState = {
 export type DeviceState = {
   id: string;
   name: string;
+  blePeripheralId?: string;
   model: string;
   serialNumber: string;
   rpcTargetName: string;
@@ -72,6 +73,8 @@ export type DeviceSummary = Pick<
   | "siteCount"
   | "batteryLevel"
 > & {
+  blePeripheralId?: string;
+  rpcTargetName?: string;
   isGateway?: boolean;
   gatewayState?: GatewayState;
   gatewayHeartbeatAt?: number;

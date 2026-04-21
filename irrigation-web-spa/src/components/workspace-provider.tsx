@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -48,6 +49,7 @@ type WorkspaceContextValue = {
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
+const MENU_REFRESH_THROTTLE_MS = 15_000;
 
 export function WorkspaceProvider({ children }: PropsWithChildren) {
   const navigate = useNavigate();
@@ -60,6 +62,7 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
   const [deviceDetailsById, setDeviceDetailsById] = useState<Record<string, DeviceState>>({});
   const [loading, setLoading] = useState(() => cachedDevices.length === 0 && cachedFields.length === 0);
   const [error, setError] = useState("");
+  const lastMenuRefreshAtRef = useRef(0);
 
   const mergeFieldRecords = (nextRecords: TbFieldAssetRecord[]) => {
     setFieldRecords((current) => {
@@ -131,6 +134,9 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
     let disposed = false;
 
     const refreshOnMenuSwitch = async () => {
+      if (Date.now() - lastMenuRefreshAtRef.current < MENU_REFRESH_THROTTLE_MS) {
+        return;
+      }
       try {
         const [full, fieldsFromTb] = await Promise.all([
           fetchDeviceList(session),
@@ -146,6 +152,7 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         setDevices(full);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
+        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       } catch (refreshError) {
         if (!disposed) {
@@ -177,26 +184,28 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
       loading,
       error,
       refreshDevices: async () => {
-        const full = await fetchDeviceList(session);
+        const full = await fetchDeviceList(session, { force: true });
         setDevices(full);
         setError("");
       },
       refreshFields: async () => {
-        const fieldsFromTb = await fetchFieldAssetRecords(session).catch(() => []);
+        const fieldsFromTb = await fetchFieldAssetRecords(session, { force: true }).catch(() => []);
         const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
+        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       },
       refreshWorkspace: async () => {
         const [full, fieldsFromTb] = await Promise.all([
-          fetchDeviceList(session),
-          fetchFieldAssetRecords(session).catch(() => []),
+          fetchDeviceList(session, { force: true }),
+          fetchFieldAssetRecords(session, { force: true }).catch(() => []),
         ]);
         const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb);
         setDevices(full);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
+        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       },
     };
@@ -252,11 +261,34 @@ function applyDeviceRuntimeToFields(fields: FieldSummary[], deviceDetailsById: R
       ...(field.deviceMarkers ?? []).map((marker) => deviceDetailsById[marker.deviceId]),
     ].filter((detail): detail is DeviceState => Boolean(detail));
 
-    if (
-      linkedDetails.some((detail) =>
-        detail.sites.some((site) => site.open || site.remainingSeconds > 0),
-      )
-    ) {
+    const zoneBindingKeys = new Set(
+      (field.mapZones ?? []).flatMap((zone) => {
+        const bindings =
+          zone.deviceBindings?.length
+            ? zone.deviceBindings
+            : zone.deviceId
+              ? [{ deviceId: zone.deviceId, siteNumber: zone.siteNumber }]
+              : [];
+        return bindings
+          .filter((binding) => binding.deviceId && Number(binding.siteNumber) > 0)
+          .map((binding) => `${binding.deviceId}:${Number(binding.siteNumber)}`);
+      }),
+    );
+
+    const hasActiveBoundSite =
+      zoneBindingKeys.size > 0
+        ? linkedDetails.some((detail) =>
+            detail.sites.some(
+              (site) =>
+                zoneBindingKeys.has(`${detail.id}:${site.siteNumber}`) &&
+                (site.open || site.remainingSeconds > 0),
+            ),
+          )
+        : linkedDetails.some((detail) =>
+            detail.sites.some((site) => site.open || site.remainingSeconds > 0),
+          );
+
+    if (hasActiveBoundSite) {
       return {
         ...field,
         irrigationState: "running" as const,

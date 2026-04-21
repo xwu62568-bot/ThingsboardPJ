@@ -12,6 +12,8 @@ export const DEFAULT_TB_BASE_URL =
 
 const CONTROL_REFRESH_DELAYS_MS = [1200, 2600];
 const DEVICE_LIST_ENRICH_CONCURRENCY = 4;
+const DEVICE_LIST_CACHE_TTL_MS = 15_000;
+const FIELD_ASSET_CACHE_TTL_MS = 15_000;
 
 const TELEMETRY_KEYS = [
   "selectedSiteNumber",
@@ -36,6 +38,9 @@ const TELEMETRY_KEYS = [
 const CLIENT_ATTRIBUTE_KEYS = [
   "appMode",
   "rpcMethods",
+  "displayName",
+  "blePeripheralId",
+  "targetDeviceName",
   "bleConnectionState",
   "bleConnected",
   "connectedDeviceId",
@@ -59,6 +64,8 @@ const SHARED_ATTRIBUTE_KEYS = [
   "siteNumber",
   "siteCount",
   "channels",
+  "displayName",
+  "blePeripheralId",
   "targetDeviceName",
 ];
 
@@ -134,8 +141,10 @@ const unsupportedDeviceInfosBaseUrls = new Set<string>();
 const unsupportedCustomerDeviceInfosKeys = new Set<string>();
 const deviceListCache = new Map<string, DeviceSummary[]>();
 const deviceListCacheMode = new Map<string, "basic" | "full">();
+const deviceListCacheFetchedAt = new Map<string, number>();
 const deviceDetailCache = new Map<string, DeviceState>();
 const fieldAssetCache = new Map<string, TbFieldAssetRecord[]>();
+const fieldAssetCacheFetchedAt = new Map<string, number>();
 const fieldSchedulerCleanupTimestamps = new Map<string, number>();
 const zoneAdvanceCleanupTimers = new Map<string, number>();
 const debugListeners = new Set<(entry: TbDebugEntry) => void>();
@@ -145,6 +154,7 @@ let debugSequence = 0;
 type DeviceMapping = {
   id?: string;
   name?: string;
+  blePeripheralId?: string;
   tbDeviceId?: string;
   rpcDeviceId?: string;
   rpcGatewayName?: string;
@@ -180,6 +190,8 @@ export type TbFieldAssetConfig = {
     deviceBindings?: Array<{
       deviceId: string;
       siteNumber?: number;
+      deviceName?: string;
+      rpcTargetName?: string;
     }>;
     valveSiteNumber?: number;
   }>;
@@ -187,6 +199,7 @@ export type TbFieldAssetConfig = {
   deviceMarkers?: Array<{
     deviceId: string;
     name: string;
+    rpcTargetName?: string;
     role: string;
     lng: number;
     lat: number;
@@ -260,6 +273,7 @@ export type TbRotationPlanConfig = {
       deviceId: string;
       siteNumber?: number;
       deviceName?: string;
+      rpcTargetName?: string;
     }>;
     deviceName?: string;
     order?: number;
@@ -450,14 +464,30 @@ export async function logoutFromThingsBoard(): Promise<void> {
   });
 }
 
-export async function fetchDeviceList(session?: TbSession | null): Promise<DeviceSummary[]> {
+export async function fetchDeviceList(
+  session?: TbSession | null,
+  options?: { force?: boolean },
+): Promise<DeviceSummary[]> {
   const resolved = resolveRequiredSession(session);
+  const cacheKey = getDeviceListCacheKey(resolved);
+  const cached = deviceListCache.get(cacheKey);
+  const fetchedAt = deviceListCacheFetchedAt.get(cacheKey) ?? 0;
+  if (
+    !options?.force &&
+    cached &&
+    cached.length > 0 &&
+    deviceListCacheMode.get(cacheKey) === "full" &&
+    Date.now() - fetchedAt < DEVICE_LIST_CACHE_TTL_MS
+  ) {
+    return cached;
+  }
   const rows = await fetchAccessibleDeviceRows(resolved);
   const devices = await mapWithConcurrency(rows, DEVICE_LIST_ENRICH_CONCURRENCY, (raw) =>
     mapToDeviceSummary(resolved, raw),
   );
-  deviceListCache.set(getDeviceListCacheKey(resolved), devices);
-  deviceListCacheMode.set(getDeviceListCacheKey(resolved), "full");
+  deviceListCache.set(cacheKey, devices);
+  deviceListCacheMode.set(cacheKey, "full");
+  deviceListCacheFetchedAt.set(cacheKey, Date.now());
   return devices;
 }
 
@@ -469,8 +499,10 @@ export async function fetchDeviceListBasic(session?: TbSession | null): Promise<
     const itemId = item.id as { id?: string } | undefined;
     return buildBaseDeviceSummary(item, itemId?.id ?? "");
   });
-  deviceListCache.set(getDeviceListCacheKey(resolved), devices);
-  deviceListCacheMode.set(getDeviceListCacheKey(resolved), "basic");
+  const cacheKey = getDeviceListCacheKey(resolved);
+  deviceListCache.set(cacheKey, devices);
+  deviceListCacheMode.set(cacheKey, "basic");
+  deviceListCacheFetchedAt.set(cacheKey, Date.now());
   return devices;
 }
 
@@ -494,8 +526,22 @@ export function hasFullCachedDeviceList(session?: TbSession | null): boolean {
 
 export async function fetchFieldAssetRecords(
   session?: TbSession | null,
+  options?: { force?: boolean },
 ): Promise<TbFieldAssetRecord[]> {
   const resolved = resolveRequiredSession(session);
+  const cacheKey = getFieldAssetCacheKey(resolved);
+  const cached = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
+  const fetchedAt = fieldAssetCacheFetchedAt.get(cacheKey) ?? 0;
+  if (
+    !options?.force &&
+    cached.length > 0 &&
+    Date.now() - fetchedAt < FIELD_ASSET_CACHE_TTL_MS
+  ) {
+    if (!fieldAssetCache.has(cacheKey)) {
+      fieldAssetCache.set(cacheKey, cached);
+    }
+    return cached;
+  }
   void cleanupStaleZoneAdvanceSchedulers(resolved).catch((error) => {
     emitDebugLog({
       level: "error",
@@ -547,6 +593,7 @@ export function getCachedFieldAssetRecords(session?: TbSession | null): TbFieldA
     const persisted = readPersistedFieldAssetRecords(cacheKey);
     if (persisted.length > 0) {
       fieldAssetCache.set(cacheKey, persisted);
+      fieldAssetCacheFetchedAt.set(cacheKey, Date.now());
     }
     return persisted;
   } catch {
@@ -912,18 +959,36 @@ function buildBaseDeviceSummary(
   item: Record<string, unknown>,
   deviceId: string,
 ): DeviceSummary {
+  const blePeripheralId =
+    toStringValue(item.blePeripheralId) ??
+    toStringValue(item.macAddress) ??
+    toStringValue(item.deviceId);
   const mapping = findDeviceMapping({
     id: deviceId,
     name: typeof item.name === "string" ? item.name : undefined,
+    blePeripheralId,
+  });
+  const displayName = resolvePreferredDeviceName({
+    displayName: toStringValue(item.displayName),
+    mappingName: mapping?.name,
+    rawName: typeof item.name === "string" ? item.name : undefined,
+    label: typeof item.label === "string" ? item.label : undefined,
+    model:
+      mapping?.model ||
+      (typeof item.type === "string" ? item.type : undefined) ||
+      (typeof item.label === "string" ? item.label : undefined),
+    blePeripheralId,
+    deviceId,
   });
   const inferredSiteCount = inferSiteCountFromDeviceIdentity(
-    typeof item.name === "string" ? item.name : undefined,
+    displayName,
     typeof item.type === "string" ? item.type : undefined,
     typeof item.label === "string" ? item.label : undefined,
   );
   return {
     id: deviceId,
-    name: typeof item.name === "string" ? item.name : "未命名设备",
+    name: displayName,
+    blePeripheralId,
     model:
       mapping?.model ||
       (typeof item.type === "string" && item.type) ||
@@ -931,7 +996,11 @@ function buildBaseDeviceSummary(
       "Device",
     serialNumber:
       mapping?.serialNumber ||
-      (typeof item.name === "string" ? item.name : deviceId),
+      displayName,
+    rpcTargetName:
+      (typeof item.targetDeviceName === "string" && item.targetDeviceName.trim()) ||
+      (typeof item.name === "string" && item.name.trim()) ||
+      "",
     platformState: resolvePlatformState(item),
     platformLastActivityAt: resolvePlatformLastActivityAt(item),
     connectivityState: "disconnected" as ConnectivityState,
@@ -989,9 +1058,31 @@ function enrichDeviceSummary(
     ? normalizeGatewayState(gatewayHeartbeatAt, telemetry.gatewayOnline, platformState)
     : undefined;
   const statusChangedAt = toInt(clientAttributes.lastConnectionUpdateTs) ?? base.statusChangedAt ?? 0;
+  const blePeripheralId =
+    toStringValue(clientAttributes.blePeripheralId) ??
+    toStringValue(sharedAttributes.blePeripheralId) ??
+    base.blePeripheralId;
+  const displayName = resolvePreferredDeviceName({
+    displayName:
+      toStringValue(clientAttributes.displayName) ??
+      toStringValue(sharedAttributes.displayName),
+    mappingName: undefined,
+    rawName: base.name,
+    label: typeof item.label === "string" ? item.label : undefined,
+    model: base.model,
+    blePeripheralId,
+    deviceId: base.id,
+  });
+  const rpcTargetName =
+    toStringValue(sharedAttributes.targetDeviceName) ??
+    toStringValue(clientAttributes.targetDeviceName) ??
+    base.rpcTargetName;
 
   return {
     ...base,
+    name: displayName,
+    blePeripheralId,
+    rpcTargetName,
     isGateway,
     gatewayState,
     gatewayHeartbeatAt,
@@ -1383,8 +1474,10 @@ function clearTbClientCaches() {
   gatewayCache.clear();
   deviceListCache.clear();
   deviceListCacheMode.clear();
+  deviceListCacheFetchedAt.clear();
   deviceDetailCache.clear();
   fieldAssetCache.clear();
+  fieldAssetCacheFetchedAt.clear();
   clearPersistedFieldAssetRecords();
 }
 
@@ -1411,6 +1504,7 @@ function getPersistedFieldAssetCacheKey(cacheKey: string) {
 function setCachedFieldAssetRecords(session: TbSession, records: TbFieldAssetRecord[]) {
   const cacheKey = getFieldAssetCacheKey(session);
   fieldAssetCache.set(cacheKey, records);
+  fieldAssetCacheFetchedAt.set(cacheKey, Date.now());
   persistFieldAssetRecords(cacheKey, records);
 }
 
@@ -1419,6 +1513,7 @@ function upsertCachedFieldAssetRecord(session: TbSession, record: TbFieldAssetRe
   const current = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
   const next = [record, ...current.filter((item) => item.id !== record.id)];
   fieldAssetCache.set(cacheKey, next);
+  fieldAssetCacheFetchedAt.set(cacheKey, Date.now());
   persistFieldAssetRecords(cacheKey, next);
 }
 
@@ -1427,6 +1522,7 @@ function removeCachedFieldAssetRecord(session: TbSession, fieldId: string) {
   const current = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
   const next = current.filter((record) => record.id !== fieldId);
   fieldAssetCache.set(cacheKey, next);
+  fieldAssetCacheFetchedAt.set(cacheKey, Date.now());
   persistFieldAssetRecords(cacheKey, next);
 }
 
@@ -1444,6 +1540,7 @@ function updateCachedFieldAssetConfig(
     record.id === fieldId ? { ...record, config: { ...record.config, ...patch } } : record,
   );
   fieldAssetCache.set(cacheKey, next);
+  fieldAssetCacheFetchedAt.set(cacheKey, Date.now());
   persistFieldAssetRecords(cacheKey, next);
 }
 
@@ -2307,6 +2404,7 @@ function normalizeRotationPlanConfigs(value: unknown): TbRotationPlanConfig[] {
                           deviceId,
                           siteNumber: toInt(entry.siteNumber) ?? undefined,
                           deviceName: toStringValue(entry.deviceName),
+                          rpcTargetName: toStringValue(entry.rpcTargetName),
                         },
                       ];
                     })
@@ -2333,11 +2431,12 @@ function normalizeExecutionPlanZones(
         matchedZone?.deviceBindings?.length
           ? matchedZone.deviceBindings
           : zone.deviceBindings?.length
-            ? zone.deviceBindings
-            : (zone.deviceIds ?? (zone.deviceId ? [zone.deviceId] : [])).map((deviceId) => ({
+              ? zone.deviceBindings
+              : (zone.deviceIds ?? (zone.deviceId ? [zone.deviceId] : [])).map((deviceId) => ({
                 deviceId,
                 siteNumber: zone.siteNumber,
                 deviceName: zone.deviceName,
+                rpcTargetName: undefined,
               }));
 
       const executionBindings = bindings
@@ -2348,13 +2447,14 @@ function normalizeExecutionPlanZones(
             deviceId: binding.deviceId,
             siteNumber: binding.siteNumber ?? zone.siteNumber,
             deviceName: marker?.name || zone.deviceName || binding.deviceId,
+            rpcTargetName: binding.rpcTargetName || marker?.rpcTargetName || binding.deviceName || marker?.name || zone.deviceName || binding.deviceId,
           };
         });
 
       return {
         ...zone,
         deviceId: executionBindings[0]?.deviceId ?? zone.deviceId,
-        deviceName: executionBindings[0]?.deviceName || zone.deviceName,
+        deviceName: executionBindings[0]?.rpcTargetName || executionBindings[0]?.deviceName || zone.deviceName,
         deviceBindings: executionBindings,
         deviceIds: executionBindings.map((binding) => binding.deviceId),
       };
@@ -2365,6 +2465,7 @@ function normalizeExecutionPlanZones(
         ...zone,
         deviceName:
           zone.deviceName ||
+          zone.deviceBindings[0]?.rpcTargetName ||
           zone.deviceBindings[0]?.deviceName ||
           zone.deviceBindings[0]?.deviceId ||
           "",
@@ -2905,9 +3006,29 @@ function mapToDeviceState(
   sharedAttributes: Record<string, unknown>,
 ): DeviceState {
   const infoId = info.id as { id?: string } | undefined;
+  const blePeripheralId =
+    toStringValue(clientAttributes.blePeripheralId) ??
+    toStringValue(sharedAttributes.blePeripheralId) ??
+    toStringValue(info.blePeripheralId) ??
+    toStringValue(info.macAddress);
   const mapping = findDeviceMapping({
     id: infoId?.id ?? "",
     name: typeof info.name === "string" ? info.name : undefined,
+    blePeripheralId,
+  });
+  const displayName = resolvePreferredDeviceName({
+    displayName:
+      toStringValue(clientAttributes.displayName) ??
+      toStringValue(sharedAttributes.displayName),
+    mappingName: mapping?.name,
+    rawName: typeof info.name === "string" ? info.name : undefined,
+    label: typeof info.label === "string" ? info.label : undefined,
+    model:
+      mapping?.model ||
+      (typeof info.type === "string" ? info.type : undefined) ||
+      (typeof info.label === "string" ? info.label : undefined),
+    blePeripheralId,
+    deviceId: infoId?.id ?? "",
   });
   const selectedSiteNumber =
     toInt(telemetry.selectedSiteNumber) ??
@@ -2922,7 +3043,7 @@ function mapToDeviceState(
     telemetry,
     selectedSiteNumber,
     deviceIdentity: [
-      typeof info.name === "string" ? info.name : undefined,
+      displayName,
       mapping?.model,
       typeof info.type === "string" ? info.type : undefined,
       typeof info.label === "string" ? info.label : undefined,
@@ -2954,8 +3075,8 @@ function mapToDeviceState(
   const lastCommand = buildLastCommand(telemetry, clientAttributes);
   const platformState = resolvePlatformState(info);
   const deviceIdentity = {
-    name: typeof info.name === "string" ? info.name : "未命名设备",
-    serialNumber: mapping?.serialNumber || (typeof info.name === "string" ? info.name : infoId?.id ?? ""),
+    name: displayName,
+    serialNumber: mapping?.serialNumber || displayName || (infoId?.id ?? ""),
     platformState,
     connectivityState: "disconnected" as ConnectivityState,
   };
@@ -2963,6 +3084,7 @@ function mapToDeviceState(
   return {
     id: infoId?.id ?? "",
     name: deviceIdentity.name,
+    blePeripheralId,
     model:
       mapping?.model ||
       (typeof info.type === "string" && info.type) ||
@@ -2970,11 +3092,14 @@ function mapToDeviceState(
       "Device",
     serialNumber:
       mapping?.serialNumber ||
-      (typeof info.name === "string" ? info.name : infoId?.id ?? ""),
+      displayName ||
+      (infoId?.id ?? ""),
     rpcTargetName:
       (typeof mapping?.rpcTargetName === "string" && mapping.rpcTargetName.trim()) ||
       (typeof sharedAttributes.targetDeviceName === "string" &&
         sharedAttributes.targetDeviceName.trim()) ||
+      (typeof clientAttributes.targetDeviceName === "string" &&
+        clientAttributes.targetDeviceName.trim()) ||
       (typeof clientAttributes.connectedDeviceName === "string" &&
         clientAttributes.connectedDeviceName.trim()) ||
       (typeof info.name === "string" ? info.name : "") ||
@@ -3180,11 +3305,15 @@ function parseDeviceMappings(): DeviceMapping[] {
   }
 }
 
-function findDeviceMapping(input: { id?: string; name?: string }) {
+function findDeviceMapping(input: { id?: string; name?: string; blePeripheralId?: string }) {
   const id = input.id?.trim();
   const name = input.name?.trim();
+  const blePeripheralId = input.blePeripheralId?.trim().toUpperCase();
   for (const item of configuredDeviceMappings) {
     if (id && (item.tbDeviceId === id || item.id === id)) {
+      return item;
+    }
+    if (blePeripheralId && item.blePeripheralId?.trim().toUpperCase() === blePeripheralId) {
       return item;
     }
     if (name && item.name?.trim() === name) {
@@ -3280,7 +3409,11 @@ function normalizeZonesAttribute(value: unknown): TbFieldAssetConfig["zones"] {
                   return [];
                 }
                 const siteNumber = toInt(entry.siteNumber) ?? undefined;
-                return siteNumber ? [{ deviceId, siteNumber }] : [{ deviceId }];
+                const rpcTargetName = toStringValue(entry.rpcTargetName);
+                const deviceName = toStringValue(entry.deviceName);
+                return siteNumber
+                  ? [{ deviceId, siteNumber, deviceName, rpcTargetName }]
+                  : [{ deviceId, deviceName, rpcTargetName }];
               })
           : undefined,
         valveSiteNumber: toInt(item.valveSiteNumber) ?? index + 1,
@@ -3305,7 +3438,8 @@ function normalizeDeviceMarkersAttribute(value: unknown): TbFieldAssetConfig["de
       }
       return {
         deviceId,
-        name: toStringValue(item.name) ?? "现场设备",
+        name: toStringValue(item.name) ?? "",
+        rpcTargetName: toStringValue(item.rpcTargetName),
         role: toStringValue(item.role) ?? "controller",
         lng,
         lat,
@@ -3319,6 +3453,66 @@ function normalizeDeviceMarkersAttribute(value: unknown): TbFieldAssetConfig["de
 
 function toStringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function resolvePreferredDeviceName(input: {
+  displayName?: string;
+  mappingName?: string;
+  rawName?: string;
+  label?: string;
+  model?: string;
+  blePeripheralId?: string;
+  deviceId?: string;
+}) {
+  const explicitDisplayName = toStringValue(input.displayName);
+  if (explicitDisplayName && !looksLikePlaceholderDeviceName(explicitDisplayName)) {
+    return explicitDisplayName;
+  }
+
+  const mappedName = toStringValue(input.mappingName);
+  if (mappedName && !looksLikePlaceholderDeviceName(mappedName)) {
+    return mappedName;
+  }
+
+  const rawName = toStringValue(input.rawName);
+  if (rawName && !looksLikeBleChildKey(rawName) && !looksLikePlaceholderDeviceName(rawName)) {
+    return rawName;
+  }
+
+  const label = toStringValue(input.label);
+  if (label && !looksLikeBleChildKey(label) && !looksLikePlaceholderDeviceName(label)) {
+    return label;
+  }
+
+  const model = toStringValue(input.model);
+  if (model && !looksLikePlaceholderDeviceName(model)) {
+    return model;
+  }
+
+  const identity = toStringValue(input.blePeripheralId) ?? toStringValue(input.deviceId);
+  if (identity) {
+    return `设备 ${shortDeviceIdentity(identity)}`;
+  }
+
+  return "设备";
+}
+
+function looksLikeBleChildKey(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith("ble-") && normalized.length >= 10;
+}
+
+function looksLikePlaceholderDeviceName(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "default" || normalized === "device" || normalized === "ble device";
+}
+
+function shortDeviceIdentity(value: string) {
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!normalized) {
+    return "未识别";
+  }
+  return normalized.length <= 6 ? normalized : normalized.slice(-6);
 }
 
 function normalizeMaybeTypedValue(value: unknown) {
@@ -3358,8 +3552,16 @@ function normalizeConnectionState(value: unknown): ConnectivityState | null {
 
 function normalizeBleConnectivityState(
   clientAttributes: Record<string, unknown>,
-  device: Pick<DeviceSummary, "name" | "serialNumber" | "platformState" | "connectivityState">,
+  device: Pick<DeviceSummary, "name" | "serialNumber" | "platformState" | "connectivityState" | "blePeripheralId">,
 ): ConnectivityState {
+  const connectedDeviceId =
+    typeof clientAttributes.connectedDeviceId === "string"
+      ? clientAttributes.connectedDeviceId.trim().toUpperCase()
+      : "";
+  const blePeripheralId = device.blePeripheralId?.trim().toUpperCase() ?? "";
+  if (connectedDeviceId && blePeripheralId && connectedDeviceId !== blePeripheralId) {
+    return "disconnected";
+  }
   const connectedName =
     typeof clientAttributes.connectedDeviceName === "string"
       ? clientAttributes.connectedDeviceName.trim()

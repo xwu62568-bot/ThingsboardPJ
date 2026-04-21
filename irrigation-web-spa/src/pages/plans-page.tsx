@@ -40,6 +40,7 @@ type ZonePlanFormState = {
     deviceId: string;
     siteNumber?: number;
     deviceName?: string;
+    rpcTargetName?: string;
   }>;
   order: string;
   durationMinutes: string;
@@ -715,6 +716,7 @@ function buildPlanConfig(
               deviceId: binding.deviceId,
               siteNumber: binding.siteNumber,
               deviceName: devices.find((device) => device.id === binding.deviceId)?.name,
+              rpcTargetName: devices.find((device) => device.id === binding.deviceId)?.rpcTargetName,
             }))
           : zone.deviceId
             ? [
@@ -722,6 +724,7 @@ function buildPlanConfig(
                   deviceId: zone.deviceId,
                   siteNumber: clampInt(Number(zone.siteNumber), 1, 999),
                   deviceName: devices.find((device) => device.id === zone.deviceId)?.name,
+                  rpcTargetName: devices.find((device) => device.id === zone.deviceId)?.rpcTargetName,
                 },
               ]
             : [];
@@ -856,6 +859,7 @@ function buildZoneFormRows(
               deviceId: zone.deviceId,
               siteNumber: zone.siteNumber,
               deviceName: zone.deviceName,
+              rpcTargetName: undefined,
             },
           ]
         : []),
@@ -986,10 +990,27 @@ function formatZoneDevice(zone: ZonePlanFormState, devices: DeviceSummary[]) {
   return bindings
     .map((binding) => {
       const device = devices.find((item) => item.id === binding.deviceId);
-      const label = binding.deviceName || device?.name || binding.deviceId.slice(0, 8);
+      const label = device
+        ? formatPlanDeviceLabel(device)
+        : `${binding.deviceName || "设备"} · ${shortenPlanDeviceIdentity(binding.deviceId)}`;
       return `${label} · ${binding.siteNumber ?? zone.siteNumber} 号站点`;
     })
     .join(" / ");
+}
+
+function formatPlanDeviceLabel(device: DeviceSummary) {
+  return `${device.name} · ${shortenPlanDeviceIdentity(device.blePeripheralId || device.id)}`;
+}
+
+function shortenPlanDeviceIdentity(value: string) {
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!normalized) {
+    return "未识别";
+  }
+  if (normalized.length <= 6) {
+    return normalized;
+  }
+  return normalized.slice(-6);
 }
 
 function formatSchedule(plan: IrrigationPlanSummary) {

@@ -291,48 +291,55 @@ function buildDeviceCards(state: BleState, tbState: ThingsBoardState) {
   const sessions = Object.values(state.sessions);
   const cloudByDevice = tbState.latestCloudAttributesByDevice ?? {};
   const realtimeByDevice = tbState.latestGatewayValuesByDevice ?? {};
-  const namedDevices = new Map(
-    state.devices
-      .filter((device) => device.name?.trim())
-      .map((device) => [device.name!.trim(), device] as const),
+  const devicesByKey = new Map(
+    state.devices.map((device) => [buildChildDeviceKey(device.id), device] as const),
   );
-  const namedSessions = new Map(
-    sessions
-      .filter((session) => session.deviceName?.trim())
-      .map((session) => [session.deviceName!.trim(), session] as const),
+  const sessionsByKey = new Map(
+    sessions.map((session) => [buildChildDeviceKey(session.deviceId), session] as const),
   );
 
-  const deviceNames = new Set<string>([
+  const deviceKeys = new Set<string>([
     ...Object.keys(cloudByDevice),
     ...Object.keys(realtimeByDevice),
-    ...Array.from(namedDevices.keys()),
-    ...Array.from(namedSessions.keys()),
+    ...Array.from(devicesByKey.keys()),
+    ...Array.from(sessionsByKey.keys()),
   ]);
 
-  const cards = Array.from(deviceNames)
-    .map((deviceName) => {
-      const session = namedSessions.get(deviceName);
-      const device = namedDevices.get(deviceName);
-      const cloudAttributes = cloudByDevice[deviceName];
-      const realtimeValues = realtimeByDevice[deviceName];
+  const cards = Array.from(deviceKeys)
+    .map((deviceKey) => {
+      const session = sessionsByKey.get(deviceKey);
+      const device = devicesByKey.get(deviceKey);
+      const cloudAttributes = cloudByDevice[deviceKey];
+      const realtimeValues = realtimeByDevice[deviceKey];
+      const displayName =
+        readString(cloudAttributes?.client?.displayName) ||
+        readString(realtimeValues?.displayName) ||
+        session?.deviceName?.trim() ||
+        device?.name?.trim() ||
+        deviceKey;
       return {
-        deviceId: session?.deviceId ?? device?.id ?? deviceName,
-        deviceName,
+        deviceId: session?.deviceId ?? device?.id ?? deviceKey,
+        deviceName: displayName,
+        deviceKey,
         session,
         cloudRows: buildCloudStatusRows(cloudAttributes),
         realtimeRows: buildRealtimeStatusRows(
-          deviceName,
+          displayName,
           realtimeValues,
           session,
-          inferDisplaySiteCount(deviceName, cloudAttributes, realtimeValues),
+          inferDisplaySiteCount(displayName, cloudAttributes, realtimeValues),
         ),
         sortAt: session?.lastConnectedAt ?? 0,
       };
     })
-    .filter((item) => item.session || cloudByDevice[item.deviceName] || realtimeByDevice[item.deviceName])
+    .filter((item) => item.session || cloudByDevice[item.deviceKey] || realtimeByDevice[item.deviceKey])
     .sort((left, right) => right.sortAt - left.sortAt);
 
   return cards;
+}
+
+function buildChildDeviceKey(deviceId: string) {
+  return `ble-${deviceId.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}`;
 }
 
 function ActionButton({
