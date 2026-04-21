@@ -47,25 +47,26 @@ export function FieldDetailPage() {
         <article className="workspacePanel">
           <div className="sectionHead">
             <div>
-              <h3>蒸散与策略输入</h3>
+              <h3>蒸散状态</h3>
             </div>
           </div>
           <div className="metricsRibbon">
             <div className="metricTile">
-              <span>标准蒸散</span>
+              <span>参考 ET0</span>
               <strong>{detail.et0.toFixed(1)} mm</strong>
             </div>
             <div className="metricTile">
-              <span>作物系数</span>
+              <span>作物系数 Kc</span>
               <strong>{detail.kc.toFixed(2)}</strong>
             </div>
             <div className="metricTile">
-              <span>作物蒸散</span>
+              <span>作物 ETc</span>
               <strong>{detail.etc.toFixed(2)} mm</strong>
             </div>
           </div>
           <p className="muted">
-            结合标准蒸散、作物系数和作物蒸散，判断当前耗水水平并估算后续灌溉节奏。
+            ET0 与 ETc 由系统按气象数据和作物系数计算，仅用于展示和策略判断。更新时间：
+            {formatEtUpdatedAt(detail.et0UpdatedAt)}
           </p>
         </article>
 
@@ -115,4 +116,16 @@ export function FieldDetailPage() {
       </section>
     </main>
   );
+}
+
+function formatEtUpdatedAt(value: number) {
+  if (!value) {
+    return "暂无";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }

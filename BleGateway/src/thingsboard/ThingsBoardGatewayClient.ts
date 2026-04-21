@@ -692,7 +692,8 @@ export class ThingsBoardGatewayClient extends ThingsBoardHttpClient {
     const base = new URL(this.mqttConfig.baseUrl);
     const host = base.hostname.replace(/[^a-zA-Z0-9]/g, '-');
     const tokenSuffix = this.mqttConfig.accessToken.slice(-6) || 'token';
-    return `ble-gateway-${host}-${tokenSuffix}`;
+    const runtimeSuffix = Math.random().toString(36).slice(2, 8);
+    return `ble-gateway-${host}-${tokenSuffix}-${runtimeSuffix}`;
   }
 
   private updateAttributesState(

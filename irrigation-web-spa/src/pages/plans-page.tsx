@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type Dispatch, type FormEvent, type SetSt
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useWorkspace } from "@/components/workspace-provider";
 import {
-  runIrrigation,
+  requestManualPlanExecution,
   saveFieldAssetRecord,
   saveFieldRotationPlans,
   type TbRotationPlanConfig,
@@ -21,6 +21,12 @@ type PlanFormState = {
   enabled: boolean;
   skipIfRain: boolean;
   mode: "manual" | "semi-auto" | "auto";
+  executionMode: "duration" | "quota";
+  targetWaterM3PerMu: string;
+  flowRateM3h: string;
+  irrigationEfficiency: string;
+  maxDurationMinutes: string;
+  splitRounds: boolean;
   zones: ZonePlanFormState[];
 };
 
@@ -93,6 +99,12 @@ export function PlansPage() {
         enabled: editingPlan.enabled,
         skipIfRain: editingPlan.skipIfRain,
         mode: editingPlan.mode,
+        executionMode: editingPlan.executionMode,
+        targetWaterM3PerMu: String(editingPlan.targetWaterM3PerMu),
+        flowRateM3h: String(editingPlan.flowRateM3h),
+        irrigationEfficiency: String(editingPlan.irrigationEfficiency),
+        maxDurationMinutes: String(editingPlan.maxDurationMinutes),
+        splitRounds: editingPlan.splitRounds,
         zones: buildZoneFormRows(field, editingPlan),
       });
     }
@@ -124,6 +136,7 @@ export function PlansPage() {
       await saveFieldRotationPlans({
         session,
         fieldId: realFieldId,
+        fieldName: field.name,
         plans: dedupePlans(nextPlans),
       });
       await refreshFields();
@@ -141,25 +154,17 @@ export function PlansPage() {
     setMessage("");
     setError("");
     try {
-      const runnableZones = plan.zones
-        .filter((zone) => zone.enabled ?? true)
-        .slice()
-        .sort((left, right) => (left.order ?? left.siteNumber) - (right.order ?? right.siteNumber));
-      if (runnableZones.length === 0) {
+      if (!plan.zones.some((zone) => zone.enabled ?? true)) {
         throw new Error("当前计划没有可执行分区");
       }
-      for (const zone of runnableZones) {
-        if (!zone.deviceId) {
-          throw new Error(`${zone.zoneName ?? `${zone.siteNumber}区`} 未绑定设备，无法执行`);
-        }
-        await runIrrigation(
-          session,
-          zone.deviceId,
-          zone.siteNumber,
-          Math.max(60, Math.round(zone.durationMinutes * 60)),
-        );
-      }
-      setMessage("计划执行命令已下发");
+      await requestManualPlanExecution({
+        session,
+        fieldId: plan.fieldId,
+        fieldName: plan.fieldName,
+        planId: plan.id,
+        planName: plan.name,
+      });
+      setMessage("执行请求已提交，规则链正在启动轮灌");
       await refreshFields();
     } catch (executeError) {
       setError(executeError instanceof Error ? executeError.message : "计划执行失败");
@@ -282,6 +287,7 @@ export function PlansPage() {
               <span>{formatSchedule(plan)}</span>
               <span>{plan.skipIfRain ? "雨天跳过" : "雨天照常"}</span>
               <span>模式 {formatPlanMode(plan.mode)}</span>
+              <span>{formatExecutionMode(plan.executionMode)}</span>
             </div>
             <div className="planZoneChips">
               {plan.zones
@@ -470,6 +476,7 @@ function PlanEditor({
             <option value="auto">允许策略执行</option>
           </select>
         </label>
+        <ExecutionFields form={form} setForm={setForm} />
         <label className="checkboxLine">
           <input
             type="checkbox"
@@ -582,6 +589,89 @@ function PlanZoneRow({
   );
 }
 
+function ExecutionFields({
+  form,
+  setForm,
+}: {
+  form: PlanFormState;
+  setForm: Dispatch<SetStateAction<PlanFormState>>;
+}) {
+  return (
+    <>
+      <label>
+        <span>执行方式</span>
+        <select
+          value={form.executionMode}
+          onChange={(event) =>
+            setFormValue(setForm, "executionMode", event.target.value as PlanFormState["executionMode"])
+          }
+        >
+          <option value="duration">按时长</option>
+          <option value="quota">定量灌溉</option>
+        </select>
+      </label>
+      {form.executionMode === "quota" ? (
+        <>
+          <label>
+            <span>目标水量（m³/亩）</span>
+            <input
+              min="0.1"
+              max="100"
+              step="0.1"
+              type="number"
+              value={form.targetWaterM3PerMu}
+              onChange={(event) => setFormValue(setForm, "targetWaterM3PerMu", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>分区流量（m³/h）</span>
+            <input
+              min="0.1"
+              max="200"
+              step="0.1"
+              type="number"
+              value={form.flowRateM3h}
+              onChange={(event) => setFormValue(setForm, "flowRateM3h", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>灌溉效率</span>
+            <input
+              min="0.1"
+              max="1"
+              step="0.01"
+              type="number"
+              value={form.irrigationEfficiency}
+              onChange={(event) => setFormValue(setForm, "irrigationEfficiency", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>单区最长时长（分钟）</span>
+            <input
+              min="1"
+              max="360"
+              step="1"
+              type="number"
+              value={form.maxDurationMinutes}
+              onChange={(event) => setFormValue(setForm, "maxDurationMinutes", event.target.value)}
+            />
+          </label>
+          <label className="checkboxLine">
+            <input
+              type="checkbox"
+              checked={form.splitRounds}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, splitRounds: event.target.checked }))
+              }
+            />
+            <span>允许拆分多轮执行</span>
+          </label>
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function buildEmptyForm(field?: FieldSummary): PlanFormState {
   return {
     name: field ? `${field.name} 轮灌计划` : "",
@@ -593,6 +683,12 @@ function buildEmptyForm(field?: FieldSummary): PlanFormState {
     enabled: true,
     skipIfRain: true,
     mode: "semi-auto",
+    executionMode: "duration",
+    targetWaterM3PerMu: "5",
+    flowRateM3h: "2",
+    irrigationEfficiency: "0.85",
+    maxDurationMinutes: "60",
+    splitRounds: true,
     zones: buildZoneFormRows(field),
   };
 }
@@ -632,6 +728,12 @@ function buildPlanConfig(
     enabled: form.enabled,
     skipIfRain: form.skipIfRain,
     mode: form.mode,
+    executionMode: form.executionMode,
+    targetWaterM3PerMu: clampNumber(Number(form.targetWaterM3PerMu), 0.1, 100),
+    flowRateM3h: clampNumber(Number(form.flowRateM3h), 0.1, 200),
+    irrigationEfficiency: clampNumber(Number(form.irrigationEfficiency), 0.1, 1),
+    maxDurationMinutes: clampInt(Number(form.maxDurationMinutes), 1, 360),
+    splitRounds: form.splitRounds,
     zones,
   };
 }
@@ -651,6 +753,12 @@ function mapSummaryToConfig(
     enabled: plan.enabled,
     skipIfRain: plan.skipIfRain,
     mode: plan.mode,
+    executionMode: plan.executionMode,
+    targetWaterM3PerMu: plan.targetWaterM3PerMu,
+    flowRateM3h: plan.flowRateM3h,
+    irrigationEfficiency: plan.irrigationEfficiency,
+    maxDurationMinutes: plan.maxDurationMinutes,
+    splitRounds: plan.splitRounds,
     zones: plan.zones.map((zone, index) => ({
       zoneId: zone.zoneId,
       zoneName: zone.zoneName,
@@ -744,6 +852,7 @@ async function savePlansForField(
   await saveFieldRotationPlans({
     session,
     fieldId: realFieldId,
+    fieldName: field.name,
     plans: dedupePlans(fieldPlans),
   });
 }
@@ -839,8 +948,19 @@ function clampInt(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, value));
+}
+
 function isThingsBoardId(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function formatExecutionMode(mode: "duration" | "quota") {
+  return mode === "quota" ? "定量灌溉" : "按时长";
 }
 
 function formatPlanMode(mode: "manual" | "semi-auto" | "auto") {

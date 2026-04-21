@@ -46,6 +46,7 @@ export class ThingsBoardBridge {
   ];
   private static readonly pendingConnectTimeoutMs = 60000;
   private static readonly heartbeatIntervalMs = 45000;
+  private static readonly snapshotCooldownMs = 30000;
 
   private client: ThingsBoardGatewayClient;
   private bleService: BleService;
@@ -65,6 +66,8 @@ export class ThingsBoardBridge {
   private lastCloudStatusSnapshot = '';
   private lastSharedControlSnapshot = '';
   private lastChildBleSnapshots = new Map<string, string>();
+  private lastSnapshotRequestAt = new Map<string, number>();
+  private snapshotRequestsInFlight = new Set<string>();
   private lastConnectionUpdateTs = Date.now();
   private pendingNotifyBuffers = new Map<string, number[]>();
   private pendingSendCommands = new Map<
@@ -193,7 +196,7 @@ export class ThingsBoardBridge {
   }
 
   requestDeviceSnapshotNow(deviceId?: string): Promise<void> {
-    return this.requestDeviceSnapshot(deviceId);
+    return this.requestDeviceSnapshot(deviceId, { force: true });
   }
 
   refreshCloudStateNow(): Promise<void> {
@@ -316,17 +319,28 @@ export class ThingsBoardBridge {
         });
         this.client.setLastRpcMethod(method);
         try {
+          if (method === 'openValve') {
+            await this.client.replyRpc(rpc.id, {
+              success: true,
+              method,
+              accepted: true,
+              message: 'valve-command-accepted',
+              receivedAt: Date.now(),
+            });
+          }
           const result = await this.handleRpc(method, rpc.params ?? {});
           console.log('[TB-BRIDGE] rpc success', {
             id: rpc.id,
             method,
             result,
           });
-          await this.client.replyRpc(rpc.id, {
-            success: true,
-            method,
-            ...result,
-          });
+          if (method !== 'openValve') {
+            await this.client.replyRpc(rpc.id, {
+              success: true,
+              method,
+              ...result,
+            });
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.log('[TB-BRIDGE] rpc failed', {
@@ -334,11 +348,22 @@ export class ThingsBoardBridge {
             method,
             error: message,
           });
-          await this.client.replyRpc(rpc.id, {
-            success: false,
-            method,
-            error: message,
-          });
+          if (method === 'openValve') {
+            await this.client.publishTelemetry({
+              ts: Date.now(),
+              values: {
+                lastRpcMethod: method,
+                lastRpcSuccess: false,
+                lastRpcError: message,
+              },
+            });
+          } else {
+            await this.client.replyRpc(rpc.id, {
+              success: false,
+              method,
+              error: message,
+            });
+          }
           throw error;
         }
       } catch (error) {
@@ -690,7 +715,7 @@ export class ThingsBoardBridge {
       },
       'connected',
     );
-    await this.requestDeviceSnapshot(device.id);
+    await this.requestDeviceSnapshot(device.id, { force: true });
   }
 
   private async resyncAfterMqttReconnect(): Promise<void> {
@@ -745,7 +770,9 @@ export class ThingsBoardBridge {
         siteCount: deviceContext.siteCount,
       });
 
-      await this.client.connectChildDevice(deviceName);
+      if (this.connectedChildDevices.get(session.deviceId) !== deviceName) {
+        await this.client.connectChildDevice(deviceName);
+      }
       await this.client.publishAttributes({
         targetDeviceName: deviceName,
         targetDeviceId: session.deviceId,
@@ -1226,10 +1253,25 @@ export class ThingsBoardBridge {
     Alert.alert(title, message);
   }
 
-  private async requestDeviceSnapshot(deviceId?: string): Promise<void> {
+  private async requestDeviceSnapshot(
+    deviceId?: string,
+    options?: { force?: boolean },
+  ): Promise<void> {
     const connectedDeviceId = deviceId ?? this.bleStore.getState().connectedDeviceId;
     if (!connectedDeviceId) {
       console.log('[TB-BRIDGE] skip request snapshot because no connected device');
+      return;
+    }
+    const now = Date.now();
+    const lastRequestedAt = this.lastSnapshotRequestAt.get(connectedDeviceId) ?? 0;
+    if (!options?.force && this.snapshotRequestsInFlight.has(connectedDeviceId)) {
+      return;
+    }
+    if (
+      !options?.force &&
+      lastRequestedAt > 0 &&
+      now - lastRequestedAt < ThingsBoardBridge.snapshotCooldownMs
+    ) {
       return;
     }
 
@@ -1240,6 +1282,8 @@ export class ThingsBoardBridge {
 
     const stateBytes = buildRequestDeviceStateCommand(deviceContext?.siteCount ?? 1);
     const timeBatteryBytes = buildRequestTimeAndBatteryCommand();
+    this.snapshotRequestsInFlight.add(connectedDeviceId);
+    this.lastSnapshotRequestAt.set(connectedDeviceId, now);
     console.log('[TB-BRIDGE] request device snapshot', {
       siteCount: deviceContext?.siteCount ?? 1,
       selectedSiteNumber: deviceContext?.selectedSiteNumber ?? 1,
@@ -1248,17 +1292,21 @@ export class ThingsBoardBridge {
       deviceId: connectedDeviceId,
       deviceName,
     });
-    await this.bleService.write(stateBytes, {
-      withResponse: true,
-      maxChunkSize: 20,
-      deviceId: connectedDeviceId,
-    });
-    await sleep(200);
-    await this.bleService.write(timeBatteryBytes, {
-      withResponse: true,
-      maxChunkSize: 20,
-      deviceId: connectedDeviceId,
-    });
+    try {
+      await this.bleService.write(stateBytes, {
+        withResponse: true,
+        maxChunkSize: 20,
+        deviceId: connectedDeviceId,
+      });
+      await sleep(200);
+      await this.bleService.write(timeBatteryBytes, {
+        withResponse: true,
+        maxChunkSize: 20,
+        deviceId: connectedDeviceId,
+      });
+    } finally {
+      this.snapshotRequestsInFlight.delete(connectedDeviceId);
+    }
   }
 
   private parseOptionalInt(

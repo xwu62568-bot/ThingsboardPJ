@@ -27,6 +27,8 @@ export type FieldSummary = {
   et0: number;
   kc: number;
   etc: number;
+  et0UpdatedAt: number;
+  et0Source: string;
 };
 
 export type FieldDetail = FieldSummary & {
@@ -67,6 +69,12 @@ export type IrrigationPlanSummary = {
   zoneCount: number;
   totalDurationMinutes: number;
   mode: "manual" | "semi-auto" | "auto";
+  executionMode: "duration" | "quota";
+  targetWaterM3PerMu: number;
+  flowRateM3h: number;
+  irrigationEfficiency: number;
+  maxDurationMinutes: number;
+  splitRounds: boolean;
   zones: Array<{
     zoneId?: string;
     zoneName?: string;
@@ -84,7 +92,7 @@ export type StrategySummary = {
   name: string;
   fieldId: string;
   fieldName: string;
-  type: "threshold" | "quota" | "etc";
+  type: "threshold" | "etc";
   enabled: boolean;
   scope: "field" | "zones";
   zoneIds: string[];
@@ -97,6 +105,7 @@ export type StrategySummary = {
   irrigationEfficiency: number;
   effectiveRainfallRatio: number;
   replenishRatio: number;
+  executionMode: "duration" | "quota" | "etc";
   minIntervalHours: number;
   maxDurationMinutes: number;
   splitRounds: boolean;
@@ -148,6 +157,8 @@ export function buildFieldSummaries(devices: DeviceSummary[]): FieldSummary[] {
       et0,
       kc,
       etc,
+      et0UpdatedAt: 0,
+      et0Source: "",
     };
   });
 }
@@ -166,6 +177,8 @@ export function buildFieldSummariesFromRecords(
     const et0 = toNumber(record.telemetry.et0) ?? 0;
     const kc = toNumber(record.telemetry.kc) ?? record.config.kc ?? 0;
     const etc = toNumber(record.telemetry.etc) ?? (et0 && kc ? Number((et0 * kc).toFixed(2)) : 0);
+    const et0UpdatedAt = toNumber(record.telemetry.et0UpdatedAt) ?? 0;
+    const et0Source = typeof record.telemetry.et0Source === "string" ? record.telemetry.et0Source : "";
     const soilMoisture =
       toNumber(record.telemetry.soilMoisture) ?? (device ? 0 : clamp(28 + (seed % 30), 18, 62));
     const batteryLevel =
@@ -198,6 +211,8 @@ export function buildFieldSummariesFromRecords(
       et0,
       kc,
       etc,
+      et0UpdatedAt,
+      et0Source,
     };
   });
 }
@@ -363,6 +378,12 @@ function normalizeRotationPlans(value: unknown): TbRotationPlanConfig[] {
           item.mode === "manual" || item.mode === "semi-auto" || item.mode === "auto"
             ? item.mode
             : "semi-auto",
+        executionMode: item.executionMode === "quota" ? "quota" : "duration",
+        targetWaterM3PerMu: toNumber(item.targetWaterM3PerMu) ?? 5,
+        flowRateM3h: toNumber(item.flowRateM3h) ?? 2,
+        irrigationEfficiency: toNumber(item.irrigationEfficiency) ?? 0.85,
+        maxDurationMinutes: toNumber(item.maxDurationMinutes) ?? 60,
+        splitRounds: typeof item.splitRounds === "boolean" ? item.splitRounds : true,
         zones,
       };
     });
@@ -396,6 +417,12 @@ function mapRotationPlanToSummary(
     zoneCount: zones.length,
     totalDurationMinutes: sumPlanDuration(zones),
     mode: plan.mode,
+    executionMode: plan.executionMode ?? "duration",
+    targetWaterM3PerMu: plan.targetWaterM3PerMu ?? 5,
+    flowRateM3h: plan.flowRateM3h ?? 2,
+    irrigationEfficiency: plan.irrigationEfficiency ?? 0.85,
+    maxDurationMinutes: plan.maxDurationMinutes ?? 60,
+    splitRounds: plan.splitRounds ?? true,
     zones,
   };
 }
@@ -417,7 +444,7 @@ function normalizeAutomationStrategies(value: unknown): TbAutomationStrategyConf
       name: typeof item.name === "string" && item.name ? item.name : `自动策略${index + 1}`,
       fieldId: typeof item.fieldId === "string" ? item.fieldId : "",
       type:
-        item.type === "quota" || item.type === "etc" || item.type === "threshold"
+        item.type === "etc" || item.type === "threshold"
           ? item.type
           : "threshold",
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
@@ -434,6 +461,12 @@ function normalizeAutomationStrategies(value: unknown): TbAutomationStrategyConf
       irrigationEfficiency: toNumber(item.irrigationEfficiency) ?? 0.85,
       effectiveRainfallRatio: toNumber(item.effectiveRainfallRatio) ?? 0.7,
       replenishRatio: toNumber(item.replenishRatio) ?? 0.8,
+      executionMode:
+        item.executionMode === "quota" || item.type === "quota"
+          ? "quota"
+          : item.executionMode === "etc"
+            ? "etc"
+            : "duration",
       minIntervalHours: toNumber(item.minIntervalHours) ?? 12,
       maxDurationMinutes: toNumber(item.maxDurationMinutes) ?? 60,
       splitRounds: typeof item.splitRounds === "boolean" ? item.splitRounds : true,
@@ -469,6 +502,7 @@ function mapAutomationStrategyToSummary(
     irrigationEfficiency: strategy.irrigationEfficiency ?? 0.85,
     effectiveRainfallRatio: strategy.effectiveRainfallRatio ?? 0.7,
     replenishRatio: strategy.replenishRatio ?? 0.8,
+    executionMode: strategy.executionMode ?? (strategy.type === "etc" ? "etc" : "duration"),
     minIntervalHours: strategy.minIntervalHours ?? 12,
     maxDurationMinutes: strategy.maxDurationMinutes ?? 60,
     splitRounds: strategy.splitRounds ?? true,

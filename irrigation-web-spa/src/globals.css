@@ -825,6 +825,241 @@ select {
   gap: 14px;
 }
 
+.dashboardCommandGrid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.82fr) minmax(360px, 1.45fr) minmax(240px, 0.82fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.dashboardSideColumn {
+  display: grid;
+  gap: 14px;
+}
+
+.dashboardMapPanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  min-height: 100%;
+}
+
+.dashboardAmapShell {
+  height: 100%;
+  min-height: 620px;
+}
+
+.dashboardAmapShell .amapCanvas {
+  min-height: 620px;
+}
+
+.dashboardMapFallback {
+  position: relative;
+}
+
+.dashboardAmapMarker {
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+.dashboardAmapMarker--running {
+  border-color: rgba(2, 132, 199, 0.28);
+}
+
+.dashboardAmapMarker--attention {
+  border-color: rgba(217, 119, 6, 0.3);
+}
+
+.dashboardAmapMarker--offline {
+  opacity: 0.78;
+  filter: grayscale(0.4);
+}
+
+.dashboardFieldMap {
+  display: grid;
+  gap: 12px;
+  position: relative;
+}
+
+.dashboardFieldMap svg {
+  width: 100%;
+  height: 430px;
+  display: block;
+  border: 1px solid rgba(20, 83, 45, 0.12);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.dashboardMapField {
+  cursor: pointer;
+  outline: none;
+}
+
+.dashboardMapField polygon {
+  stroke-width: 3;
+  stroke-linejoin: round;
+  transition:
+    filter 0.16s ease,
+    stroke-width 0.16s ease;
+}
+
+.dashboardMapField circle {
+  stroke: #fff;
+  stroke-width: 3;
+}
+
+.dashboardMapField text {
+  fill: #173326;
+  font-size: 24px;
+  font-weight: 800;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: rgba(255, 255, 255, 0.86);
+  stroke-width: 5px;
+  text-anchor: middle;
+}
+
+.dashboardMapField:hover polygon {
+  filter: drop-shadow(0 12px 16px rgba(15, 23, 42, 0.18));
+  stroke-width: 5;
+}
+
+.dashboardMapField:focus-visible polygon {
+  stroke-width: 5;
+  filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0));
+}
+
+.dashboardMapField--placeholder {
+  opacity: 0.76;
+}
+
+.dashboardMapField--placeholder text {
+  fill: #64748b;
+}
+
+.dashboardMapClickLayer {
+  position: absolute;
+  inset: 0 0 34px;
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.dashboardMapHotspot {
+  position: absolute;
+  width: 72px;
+  height: 72px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+
+.dashboardMapHotspot:hover {
+  background: rgba(14, 165, 233, 0.12);
+  outline: 1px solid rgba(14, 165, 233, 0.2);
+}
+
+.dashboardMapEmptyOverlay {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  display: grid;
+  gap: 6px;
+  min-width: min(320px, calc(100% - 48px));
+  padding: 16px;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-sm);
+  color: var(--text-secondary);
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.dashboardMapEmptyOverlay strong {
+  color: var(--text);
+}
+
+.dashboardMapEmptyOverlay p {
+  margin: 0;
+}
+
+.compactRiskItem {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.dashboardMapField--idle polygon {
+  fill: rgba(22, 163, 74, 0.24);
+  stroke: #16a34a;
+}
+
+.dashboardMapField--idle circle {
+  fill: #16a34a;
+}
+
+.dashboardMapField--running polygon {
+  fill: rgba(14, 165, 233, 0.28);
+  stroke: #0284c7;
+}
+
+.dashboardMapField--running circle {
+  fill: #0284c7;
+}
+
+.dashboardMapField--attention polygon {
+  fill: rgba(245, 158, 11, 0.3);
+  stroke: #d97706;
+}
+
+.dashboardMapField--attention circle {
+  fill: #d97706;
+}
+
+.dashboardMapField--offline polygon {
+  fill: rgba(100, 116, 139, 0.22);
+  stroke: #64748b;
+}
+
+.dashboardMapField--offline circle {
+  fill: #64748b;
+}
+
+.dashboardMapLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.dashboardMapLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legendDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+}
+
+.legendDot--idle {
+  background: #16a34a;
+}
+
+.legendDot--running {
+  background: #0284c7;
+}
+
+.legendDot--attention {
+  background: #d97706;
+}
+
+.legendDot--offline {
+  background: #64748b;
+}
+
 .scheduleItem,
 .riskItem {
   display: grid;
@@ -945,6 +1180,75 @@ select {
   margin: 0;
   color: #0c4a6e;
   line-height: 1.6;
+}
+
+.et0TrendPanel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid rgba(14, 165, 233, 0.16);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.et0TrendPanel--compact {
+  padding: 12px;
+}
+
+.et0TrendPanel--compact .et0TrendChart {
+  height: 112px;
+}
+
+.et0TrendPanel--compact .et0TrendLabels {
+  gap: 4px;
+}
+
+.et0TrendPanel--compact .et0TrendLabels span {
+  font-size: 0.6875rem;
+}
+
+.compactSectionHead {
+  margin: 0;
+}
+
+.compactSectionHead p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.et0TrendChart {
+  width: 100%;
+  height: 150px;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(rgba(14, 165, 233, 0.07) 1px, transparent 1px) 0 0 / 100% 25%,
+    linear-gradient(180deg, rgba(240, 249, 255, 0.92), rgba(255, 255, 255, 0.78));
+}
+
+.et0TrendLabels {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.et0TrendLabels span {
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.et0TrendLabels strong {
+  color: #0369a1;
+  font-size: 0.875rem;
+}
+
+.et0TrendLabels em {
+  color: var(--text-muted);
+  font-style: normal;
 }
 
 .emptyHint {
@@ -2428,6 +2732,15 @@ select {
 
 /* —— 响应式 —— */
 @media (max-width: 1260px) {
+  .dashboardCommandGrid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  }
+
+  .dashboardCommandGrid .dashboardSideColumn:last-child {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .twoColumnGrid,
   .mapHero,
   .statsGrid,
@@ -2459,6 +2772,15 @@ select {
 }
 
 @media (max-width: 1024px) {
+  .dashboardCommandGrid,
+  .dashboardCommandGrid .dashboardSideColumn:last-child {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboardFieldMap svg {
+    height: 340px;
+  }
+
   .loginPage {
     grid-template-columns: 1fr;
     padding: 32px 0;

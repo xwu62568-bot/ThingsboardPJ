@@ -63,6 +63,32 @@ const SHARED_ATTRIBUTE_KEYS = [
 ];
 
 const FIELD_ASSET_TYPE = "Field";
+const FIELD_SCHEDULER_EVENT_TYPE =
+  import.meta.env.VITE_TB_FIELD_SCHEDULER_EVENT_TYPE?.trim() || "IRRIGATION_PLAN_TICK";
+const FIELD_SCHEDULER_EVENT_PREFIX =
+  import.meta.env.VITE_TB_FIELD_SCHEDULER_EVENT_PREFIX?.trim() || "专业灌溉巡检：";
+const PLAN_SCHEDULER_EVENT_PREFIX =
+  import.meta.env.VITE_TB_PLAN_SCHEDULER_EVENT_PREFIX?.trim() || "专业灌溉计划：";
+const ZONE_ADVANCE_SCHEDULER_EVENT_PREFIX =
+  import.meta.env.VITE_TB_ZONE_ADVANCE_SCHEDULER_EVENT_PREFIX?.trim() || "专业灌溉推进：";
+const FIELD_SCHEDULER_TIMEZONE =
+  import.meta.env.VITE_TB_FIELD_SCHEDULER_TIMEZONE?.trim() || "Asia/Shanghai";
+const FIELD_SCHEDULER_PERIOD_SECONDS = Math.max(
+  60,
+  Number(import.meta.env.VITE_TB_FIELD_SCHEDULER_PERIOD_SECONDS || 60) || 60,
+);
+const ZONE_ADVANCE_DELETE_DELAY_MS = Math.max(
+  60_000,
+  Number(import.meta.env.VITE_TB_ZONE_ADVANCE_DELETE_DELAY_MS || 120_000) || 120_000,
+);
+const ZONE_ADVANCE_STALE_MS = Math.max(
+  5 * 60_000,
+  Number(import.meta.env.VITE_TB_ZONE_ADVANCE_STALE_MS || 15 * 60_000) || 15 * 60_000,
+);
+const FIELD_SCHEDULER_CLEANUP_THROTTLE_MS = Math.max(
+  60_000,
+  Number(import.meta.env.VITE_TB_FIELD_SCHEDULER_CLEANUP_THROTTLE_MS || 5 * 60_000) || 5 * 60_000,
+);
 const FIELD_ATTRIBUTE_KEYS = [
   "code",
   "groupName",
@@ -80,6 +106,13 @@ const FIELD_ATTRIBUTE_KEYS = [
   "irrigationEfficiency",
   "rotationPlans",
   "automationStrategies",
+  "manualExecutionRequest",
+  "manualExecutionRequestConsumedId",
+  "irrigationExecutionState",
+  "lastProcessedAdvanceSchedulerId",
+  "lastProcessedAdvanceExecutionId",
+  "lastProcessedAdvanceZoneIndex",
+  "lastProcessedAdvanceAt",
 ];
 const FIELD_TELEMETRY_KEYS = [
   "soilMoisture",
@@ -89,6 +122,8 @@ const FIELD_TELEMETRY_KEYS = [
   "et0",
   "kc",
   "etc",
+  "et0UpdatedAt",
+  "et0Source",
   "rainfallForecastMm",
   "suggestedDurationMinutes",
 ];
@@ -101,6 +136,8 @@ const deviceListCache = new Map<string, DeviceSummary[]>();
 const deviceListCacheMode = new Map<string, "basic" | "full">();
 const deviceDetailCache = new Map<string, DeviceState>();
 const fieldAssetCache = new Map<string, TbFieldAssetRecord[]>();
+const fieldSchedulerCleanupTimestamps = new Map<string, number>();
+const zoneAdvanceCleanupTimers = new Map<string, number>();
 const debugListeners = new Set<(entry: TbDebugEntry) => void>();
 const debugBuffer: TbDebugEntry[] = [];
 let debugSequence = 0;
@@ -172,6 +209,23 @@ export type TbFieldAssetRecord = {
   telemetry: Record<string, unknown>;
 };
 
+export type TbSchedulerEventRecord = {
+  id: string;
+  name: string;
+  type: string;
+  fieldId?: string;
+  fieldName?: string;
+  planId?: string;
+  planName?: string;
+  irrigation?: string;
+  triggerMode?: string;
+  executionId?: string;
+  zoneIndex?: number;
+  startTime?: number;
+  createdTime?: number;
+  enabled?: boolean;
+};
+
 export type TbRotationPlanConfig = {
   id: string;
   name: string;
@@ -183,6 +237,12 @@ export type TbRotationPlanConfig = {
   enabled: boolean;
   skipIfRain: boolean;
   mode: "manual" | "semi-auto" | "auto";
+  executionMode?: "duration" | "quota";
+  targetWaterM3PerMu?: number;
+  flowRateM3h?: number;
+  irrigationEfficiency?: number;
+  maxDurationMinutes?: number;
+  splitRounds?: boolean;
   zones: Array<{
     zoneId?: string;
     zoneName?: string;
@@ -199,7 +259,7 @@ export type TbAutomationStrategyConfig = {
   id: string;
   name: string;
   fieldId: string;
-  type?: "threshold" | "quota" | "etc";
+  type?: "threshold" | "etc";
   enabled: boolean;
   scope?: "field" | "zones";
   zoneIds?: string[];
@@ -212,6 +272,7 @@ export type TbAutomationStrategyConfig = {
   irrigationEfficiency?: number;
   effectiveRainfallRatio?: number;
   replenishRatio?: number;
+  executionMode?: "duration" | "quota" | "etc";
   minIntervalHours?: number;
   maxDurationMinutes?: number;
   splitRounds?: boolean;
@@ -422,6 +483,22 @@ export async function fetchFieldAssetRecords(
   session?: TbSession | null,
 ): Promise<TbFieldAssetRecord[]> {
   const resolved = resolveRequiredSession(session);
+  void cleanupStaleZoneAdvanceSchedulers(resolved).catch((error) => {
+    emitDebugLog({
+      level: "error",
+      scope: "rest",
+      message: "清理过期分区推进调度失败",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  });
+  void cleanupInvalidPlanZoneAdvanceSchedulers(resolved).catch((error) => {
+    emitDebugLog({
+      level: "error",
+      scope: "rest",
+      message: "清理自动轮灌推进调度失败",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  });
   const rows = await fetchAccessibleAssetRows(resolved, FIELD_ASSET_TYPE);
   const records = await mapWithConcurrency(rows, 4, async (raw) => {
     const item = (raw ?? {}) as Record<string, unknown>;
@@ -506,14 +583,168 @@ export async function saveFieldAssetRecord(input: {
   return record;
 }
 
-export async function saveFieldRotationPlans(input: {
+export async function deleteFieldAssetRecord(input: {
   session?: TbSession | null;
   fieldId: string;
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  await deleteAllFieldSchedulerEvents({ session: resolved, fieldId: input.fieldId }).catch((error) => {
+    emitDebugLog({
+      level: "error",
+      scope: "rest",
+      message: "删除地块调度器失败",
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  });
+  await tbRequest(resolved, `/api/asset/${input.fieldId}`, {
+    method: "DELETE",
+  });
+  removeCachedFieldAssetRecord(resolved, input.fieldId);
+}
+
+export async function saveFieldSchedulerEvent(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  fieldName: string;
+}): Promise<TbSchedulerEventRecord> {
+  const resolved = resolveRequiredSession(input.session);
+  const existing = await findFieldSchedulerEvent(resolved, input.fieldId, input.fieldName);
+  const saved = (await tbRequest(resolved, "/api/schedulerEvent", {
+    method: "POST",
+    body: JSON.stringify(buildFieldSchedulerEventPayload(input.fieldId, input.fieldName, existing)),
+  })) as Record<string, unknown>;
+
+  return mapSchedulerEventRecord(saved);
+}
+
+export async function deleteFieldSchedulerEvent(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  fieldName?: string;
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  const existing = await findFieldSchedulerEvent(resolved, input.fieldId, input.fieldName);
+  if (!existing?.id) {
+    return;
+  }
+  await deleteSchedulerEventById(resolved, existing.id);
+}
+
+export async function deleteAllFieldSchedulerEvents(input: {
+  session?: TbSession | null;
+  fieldId: string;
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  const events = await fetchSchedulerEventRecords(resolved);
+  const targets = events.filter((event) => event.fieldId === input.fieldId);
+  await Promise.all(targets.map((event) => deleteSchedulerEventById(resolved, event.id)));
+}
+
+export async function syncFieldPlanSchedulerEvents(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  fieldName: string;
   plans: TbRotationPlanConfig[];
 }): Promise<void> {
   const resolved = resolveRequiredSession(input.session);
+  const events = await fetchSchedulerEventRecords(resolved);
+  const fieldPlanEvents = events.filter(
+    (event) => event.fieldId === input.fieldId && event.irrigation === "planSchedule",
+  );
+  const fieldPlanZoneAdvanceEvents = events.filter(
+    (event) =>
+      event.fieldId === input.fieldId &&
+      event.irrigation === "zoneAdvance" &&
+      event.triggerMode === "planZoneAdvance",
+  );
+  const desiredPlans = input.plans.filter((plan) => plan.enabled && plan.mode === "auto");
+  const desiredPlanIds = new Set(desiredPlans.map((plan) => plan.id));
+  const staleEvents = fieldPlanEvents.filter((event) => !event.planId || !desiredPlanIds.has(event.planId));
+  const staleZoneAdvanceEvents = fieldPlanZoneAdvanceEvents.filter((event) => {
+    if (!event.planId || !desiredPlanIds.has(event.planId)) {
+      return true;
+    }
+    const plan = desiredPlans.find((item) => item.id === event.planId);
+    if (!plan) {
+      return true;
+    }
+    const executableZones = plan.zones.filter(
+      (zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0,
+    );
+    return event.zoneIndex === undefined || event.zoneIndex < 1 || event.zoneIndex >= executableZones.length;
+  });
+
+  await Promise.all(
+    staleEvents.map((event) =>
+      deleteSchedulerEventById(resolved, event.id),
+    ),
+  );
+  await Promise.all(staleZoneAdvanceEvents.map((event) => deleteSchedulerEventById(resolved, event.id)));
+
+  for (const plan of desiredPlans) {
+    const existing = fieldPlanEvents.find((event) => event.planId === plan.id);
+    await tbRequest(resolved, "/api/schedulerEvent", {
+      method: "POST",
+      body: JSON.stringify(buildPlanSchedulerEventPayload(input.fieldId, input.fieldName, plan, existing)),
+    });
+
+    const executableZones = plan.zones
+      .filter((zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0)
+      .sort((left, right) => (left.order ?? left.siteNumber) - (right.order ?? right.siteNumber));
+    if (executableZones.length <= 1) {
+      continue;
+    }
+
+    let offsetSeconds = 0;
+    for (let zoneIndex = 0; zoneIndex < executableZones.length; zoneIndex += 1) {
+      const zone = executableZones[zoneIndex];
+      const durationSeconds = Math.max(60, Math.round(Number(zone.durationMinutes || 1) * 60));
+      if (zoneIndex === 0) {
+        offsetSeconds += durationSeconds + 5;
+        continue;
+      }
+      const zoneEvent = fieldPlanZoneAdvanceEvents.find(
+        (event) => event.planId === plan.id && event.zoneIndex === zoneIndex,
+      );
+      await tbRequest(resolved, "/api/schedulerEvent", {
+        method: "POST",
+        body: JSON.stringify(
+          buildPlanZoneAdvanceSchedulerEventPayload(
+            input.fieldId,
+            input.fieldName,
+            plan,
+            zone,
+            zoneIndex,
+            offsetSeconds,
+            zoneEvent,
+          ),
+        ),
+      });
+      offsetSeconds += durationSeconds + 5;
+    }
+  }
+}
+
+export async function saveFieldRotationPlans(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  fieldName?: string;
+  plans: TbRotationPlanConfig[];
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  await cleanupStaleZoneAdvanceSchedulers(resolved, { fieldId: input.fieldId, force: true });
   await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
     rotationPlans: input.plans,
+  });
+  await syncFieldPlanSchedulerEvents({
+    session: resolved,
+    fieldId: input.fieldId,
+    fieldName: input.fieldName || input.fieldId,
+    plans: input.plans,
+  });
+  await cleanupInvalidPlanZoneAdvanceSchedulers(resolved, {
+    fieldId: input.fieldId,
+    force: true,
   });
   updateCachedFieldAssetConfig(resolved, input.fieldId, { rotationPlans: input.plans });
 }
@@ -528,6 +759,73 @@ export async function saveFieldAutomationStrategies(input: {
     automationStrategies: input.strategies,
   });
   updateCachedFieldAssetConfig(resolved, input.fieldId, { automationStrategies: input.strategies });
+}
+
+export async function requestManualPlanExecution(input: {
+  session?: TbSession | null;
+  fieldId: string;
+  fieldName: string;
+  planId: string;
+  planName: string;
+}): Promise<void> {
+  const resolved = resolveRequiredSession(input.session);
+  const fieldExecutionContext = await loadFieldExecutionContext(resolved, input.fieldId);
+  const selectedPlan = fieldExecutionContext.rotationPlans.find((plan) => plan.id === input.planId);
+  if (!selectedPlan) {
+    throw new Error("未找到要执行的轮灌计划，请先刷新地块数据后重试");
+  }
+  const executableZones = normalizeExecutionPlanZones(selectedPlan, fieldExecutionContext.deviceMarkers);
+  if (executableZones.length === 0) {
+    throw new Error("当前计划没有可执行分区，请先检查设备绑定和站点配置");
+  }
+
+  const requestId = `manual-${Date.now()}`;
+  const requestedAt = Date.now();
+  const executionId = `exec-${requestedAt}`;
+
+  await cleanupStaleZoneAdvanceSchedulers(resolved, {
+    fieldId: input.fieldId,
+    force: true,
+    activeExecutionId: executionId,
+  });
+
+  await saveEntityAttributes(resolved, { entityType: "ASSET", id: input.fieldId }, {
+    manualExecutionRequest: {
+      id: requestId,
+      fieldId: input.fieldId,
+      fieldName: input.fieldName,
+      planId: input.planId,
+      planName: input.planName,
+      executionId,
+      requestedAt,
+      source: "frontend",
+    },
+  });
+
+  const zoneAdvanceEvents = await scheduleManualZoneAdvanceEvents({
+    session: resolved,
+    fieldId: input.fieldId,
+    fieldName: input.fieldName,
+    plan: selectedPlan,
+    executionId,
+    requestedAt,
+    areaMu: fieldExecutionContext.areaMu,
+    irrigationEfficiency: fieldExecutionContext.irrigationEfficiency,
+    deviceMarkers: fieldExecutionContext.deviceMarkers,
+  });
+  registerZoneAdvanceCleanupTimers(resolved, zoneAdvanceEvents);
+
+  await submitRuleEngineMessage(resolved, { entityType: "ASSET", id: input.fieldId }, {
+    irrigation: "fieldInspect",
+    triggerMode: "manualExecution",
+    fieldId: input.fieldId,
+    fieldName: input.fieldName,
+    planId: input.planId,
+    planName: input.planName,
+    executionId,
+    requestId,
+    requestedAt,
+  });
 }
 
 async function mapToDeviceSummary(
@@ -1110,6 +1408,14 @@ function upsertCachedFieldAssetRecord(session: TbSession, record: TbFieldAssetRe
   persistFieldAssetRecords(cacheKey, next);
 }
 
+function removeCachedFieldAssetRecord(session: TbSession, fieldId: string) {
+  const cacheKey = getFieldAssetCacheKey(session);
+  const current = fieldAssetCache.get(cacheKey) ?? readPersistedFieldAssetRecords(cacheKey);
+  const next = current.filter((record) => record.id !== fieldId);
+  fieldAssetCache.set(cacheKey, next);
+  persistFieldAssetRecords(cacheKey, next);
+}
+
 function updateCachedFieldAssetConfig(
   session: TbSession,
   fieldId: string,
@@ -1609,6 +1915,852 @@ async function saveEntityAttributes(
     method: "POST",
     body: JSON.stringify(compactRecord(attributes)),
   });
+}
+
+async function submitRuleEngineMessage(
+  session: TbSession,
+  entity: TbEntityRef,
+  message: Record<string, unknown>,
+) {
+  await tbRequest(session, `/api/rule-engine/${entity.entityType}/${entity.id}/1000`, {
+    method: "POST",
+    body: JSON.stringify(compactRecord(message)),
+  });
+}
+
+type FieldExecutionContext = {
+  rotationPlans: TbRotationPlanConfig[];
+  deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>;
+  areaMu: number;
+  irrigationEfficiency: number;
+};
+
+async function loadFieldExecutionContext(
+  session: TbSession,
+  fieldId: string,
+): Promise<FieldExecutionContext> {
+  const attributes = await getEntityAttributes(
+    session,
+    { entityType: "ASSET", id: fieldId },
+    "SERVER_SCOPE",
+    ["rotationPlans", "deviceMarkers", "areaMu", "irrigationEfficiency"],
+  );
+
+  return {
+    rotationPlans: normalizeRotationPlanConfigs(attributes.rotationPlans),
+    deviceMarkers: normalizeDeviceMarkersAttribute(attributes.deviceMarkers) ?? [],
+    areaMu: toNumber(attributes.areaMu) ?? 0,
+    irrigationEfficiency: toNumber(attributes.irrigationEfficiency) ?? 0.85,
+  };
+}
+
+async function scheduleManualZoneAdvanceEvents(input: {
+  session: TbSession;
+  fieldId: string;
+  fieldName: string;
+  plan: TbRotationPlanConfig;
+  executionId: string;
+  requestedAt: number;
+  areaMu: number;
+  irrigationEfficiency: number;
+  deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>;
+}) {
+  const events = await fetchSchedulerEventRecords(input.session);
+  const zones = normalizeExecutionPlanZones(input.plan, input.deviceMarkers);
+  if (zones.length <= 1) {
+    return [];
+  }
+
+  const createdEvents: TbSchedulerEventRecord[] = [];
+  let scheduledAt = input.requestedAt;
+
+  for (let zoneIndex = 0; zoneIndex < zones.length; zoneIndex += 1) {
+    const zone = zones[zoneIndex];
+    const durationSeconds = calculatePlanZoneDurationSeconds({
+      plan: input.plan,
+      zone,
+      zoneCount: zones.length,
+      areaMu: input.areaMu,
+      irrigationEfficiency: input.irrigationEfficiency,
+    });
+
+    if (zoneIndex === 0) {
+      scheduledAt += durationSeconds * 1000 + 5_000;
+      continue;
+    }
+
+    const existing = events.find(
+      (event) =>
+        event.irrigation === "zoneAdvance" &&
+        event.fieldId === input.fieldId &&
+        event.executionId === input.executionId &&
+        event.zoneIndex === zoneIndex,
+    );
+
+    const saved = (await tbRequest(input.session, "/api/schedulerEvent", {
+      method: "POST",
+      body: JSON.stringify(
+        buildZoneAdvanceSchedulerEventPayload(
+          {
+            triggerMode: "manualZoneAdvance",
+            fieldId: input.fieldId,
+            fieldName: input.fieldName,
+            planId: input.plan.id,
+            planName: input.plan.name,
+            executionId: input.executionId,
+            zoneIndex,
+            zoneName: zone.zoneName ?? `${zone.siteNumber}区`,
+            startTime: scheduledAt,
+          },
+          existing ?? null,
+        ),
+      ),
+    })) as Record<string, unknown>;
+
+    createdEvents.push(mapSchedulerEventRecord(saved));
+    scheduledAt += durationSeconds * 1000 + 5_000;
+  }
+
+  return createdEvents;
+}
+
+async function cleanupStaleZoneAdvanceSchedulers(
+  session: TbSession,
+  options: {
+    fieldId?: string;
+    force?: boolean;
+    activeExecutionId?: string;
+  } = {},
+): Promise<void> {
+  const cleanupKey = `${session.baseUrl}:${options.fieldId ?? "*"}`;
+  const now = Date.now();
+  const lastCleanupAt = fieldSchedulerCleanupTimestamps.get(cleanupKey) ?? 0;
+  if (!options.force && now - lastCleanupAt < FIELD_SCHEDULER_CLEANUP_THROTTLE_MS) {
+    return;
+  }
+  fieldSchedulerCleanupTimestamps.set(cleanupKey, now);
+
+  const events = await fetchSchedulerEventRecords(session);
+  const zoneAdvanceEvents = events.filter(
+    (event) =>
+      event.irrigation === "zoneAdvance" &&
+      event.triggerMode === "manualZoneAdvance" &&
+      (!options.fieldId || event.fieldId === options.fieldId),
+  );
+  if (zoneAdvanceEvents.length === 0) {
+    return;
+  }
+
+  const keepIds = new Set<string>();
+  const dedupeBuckets = new Map<string, TbSchedulerEventRecord[]>();
+  for (const event of zoneAdvanceEvents) {
+    const bucketKey = [
+      event.fieldId ?? "",
+      event.executionId ?? "",
+      event.planId ?? "",
+      String(event.zoneIndex ?? -1),
+    ].join(":");
+    const bucket = dedupeBuckets.get(bucketKey) ?? [];
+    bucket.push(event);
+    dedupeBuckets.set(bucketKey, bucket);
+  }
+  for (const bucket of dedupeBuckets.values()) {
+    bucket.sort(
+      (left, right) =>
+        Number(right.startTime ?? 0) - Number(left.startTime ?? 0) ||
+        Number(right.createdTime ?? 0) - Number(left.createdTime ?? 0),
+    );
+    if (bucket[0]?.id) {
+      keepIds.add(bucket[0].id);
+    }
+  }
+
+  const deleteTargets = zoneAdvanceEvents.filter((event) => {
+    if (!event.id) {
+      return false;
+    }
+    if (!keepIds.has(event.id)) {
+      return true;
+    }
+    if (options.activeExecutionId && event.executionId && event.executionId !== options.activeExecutionId) {
+      return true;
+    }
+    return Number(event.startTime ?? 0) > 0 && Number(event.startTime) < now - ZONE_ADVANCE_STALE_MS;
+  });
+
+  await Promise.all(deleteTargets.map((event) => deleteSchedulerEventById(session, event.id)));
+}
+
+async function cleanupInvalidPlanZoneAdvanceSchedulers(
+  session: TbSession,
+  options: {
+    fieldId?: string;
+    force?: boolean;
+  } = {},
+): Promise<void> {
+  const cleanupKey = `${session.baseUrl}:plan:${options.fieldId ?? "*"}`;
+  const now = Date.now();
+  const lastCleanupAt = fieldSchedulerCleanupTimestamps.get(cleanupKey) ?? 0;
+  if (!options.force && now - lastCleanupAt < FIELD_SCHEDULER_CLEANUP_THROTTLE_MS) {
+    return;
+  }
+  fieldSchedulerCleanupTimestamps.set(cleanupKey, now);
+
+  const events = await fetchSchedulerEventRecords(session);
+  const planZoneAdvanceEvents = events.filter(
+    (event) =>
+      event.irrigation === "zoneAdvance" &&
+      event.triggerMode === "planZoneAdvance" &&
+      (!options.fieldId || event.fieldId === options.fieldId),
+  );
+  if (planZoneAdvanceEvents.length === 0) {
+    return;
+  }
+
+  const eventsByField = new Map<string, TbSchedulerEventRecord[]>();
+  for (const event of planZoneAdvanceEvents) {
+    if (!event.fieldId) {
+      continue;
+    }
+    const bucket = eventsByField.get(event.fieldId) ?? [];
+    bucket.push(event);
+    eventsByField.set(event.fieldId, bucket);
+  }
+
+  const deleteIds = new Set<string>();
+  for (const [fieldId, fieldEvents] of eventsByField.entries()) {
+    const context = await loadFieldExecutionContext(session, fieldId).catch(() => null);
+    const autoPlans = new Map(
+      (context?.rotationPlans ?? [])
+        .filter((plan) => plan.enabled && plan.mode === "auto")
+        .map((plan) => [
+          plan.id,
+          normalizeExecutionPlanZones(plan, context?.deviceMarkers ?? []),
+        ]),
+    );
+
+    const keepIds = new Set<string>();
+    const dedupeBuckets = new Map<string, TbSchedulerEventRecord[]>();
+    for (const event of fieldEvents) {
+      const bucketKey = `${event.planId ?? ""}:${String(event.zoneIndex ?? -1)}`;
+      const bucket = dedupeBuckets.get(bucketKey) ?? [];
+      bucket.push(event);
+      dedupeBuckets.set(bucketKey, bucket);
+    }
+    for (const bucket of dedupeBuckets.values()) {
+      bucket.sort(
+        (left, right) =>
+          Number(right.startTime ?? 0) - Number(left.startTime ?? 0) ||
+          Number(right.createdTime ?? 0) - Number(left.createdTime ?? 0),
+      );
+      if (bucket[0]?.id) {
+        keepIds.add(bucket[0].id);
+      }
+    }
+
+    for (const event of fieldEvents) {
+      if (!event.id) {
+        continue;
+      }
+      if (!keepIds.has(event.id)) {
+        deleteIds.add(event.id);
+        continue;
+      }
+      if (!event.planId) {
+        deleteIds.add(event.id);
+        continue;
+      }
+      const zones = autoPlans.get(event.planId);
+      if (!zones || zones.length <= 1) {
+        deleteIds.add(event.id);
+        continue;
+      }
+      if (event.zoneIndex === undefined || event.zoneIndex < 1 || event.zoneIndex >= zones.length) {
+        deleteIds.add(event.id);
+      }
+    }
+  }
+
+  await Promise.all([...deleteIds].map((schedulerEventId) => deleteSchedulerEventById(session, schedulerEventId)));
+}
+
+function registerZoneAdvanceCleanupTimers(
+  session: TbSession,
+  events: TbSchedulerEventRecord[],
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  for (const event of events) {
+    if (
+      !event.id ||
+      !event.startTime ||
+      event.triggerMode !== "manualZoneAdvance" ||
+      zoneAdvanceCleanupTimers.has(event.id)
+    ) {
+      continue;
+    }
+    const delay = Math.max(5_000, event.startTime + ZONE_ADVANCE_DELETE_DELAY_MS - Date.now());
+    const timerId = window.setTimeout(() => {
+      void deleteSchedulerEventById(session, event.id)
+        .catch((error) => {
+          emitDebugLog({
+            level: "error",
+            scope: "rest",
+            message: "删除分区推进调度失败",
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(() => {
+          zoneAdvanceCleanupTimers.delete(event.id);
+        });
+    }, delay);
+    zoneAdvanceCleanupTimers.set(event.id, timerId);
+  }
+}
+
+async function deleteSchedulerEventById(session: TbSession, schedulerEventId: string) {
+  if (!schedulerEventId) {
+    return;
+  }
+  if (typeof window !== "undefined") {
+    const timerId = zoneAdvanceCleanupTimers.get(schedulerEventId);
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      zoneAdvanceCleanupTimers.delete(schedulerEventId);
+    }
+  }
+  await tbRequest(session, `/api/schedulerEvent/${schedulerEventId}`, {
+    method: "DELETE",
+  });
+}
+
+function normalizeRotationPlanConfigs(value: unknown): TbRotationPlanConfig[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({
+      id: typeof item.id === "string" ? item.id : "",
+      name: typeof item.name === "string" ? item.name : "未命名计划",
+      fieldId: typeof item.fieldId === "string" ? item.fieldId : "",
+      scheduleType:
+        (item.scheduleType === "weekly" || item.scheduleType === "interval" ? item.scheduleType : "daily") as
+          | "daily"
+          | "weekly"
+          | "interval",
+      weekdays: Array.isArray(item.weekdays) ? item.weekdays.flatMap((entry) => (typeof entry === "number" ? [entry] : [])) : [],
+      intervalDays: toInt(item.intervalDays) ?? undefined,
+      startAt: typeof item.startAt === "string" ? item.startAt : "00:00",
+      enabled: item.enabled !== false,
+      skipIfRain: item.skipIfRain === true,
+      mode: (
+        item.mode === "semi-auto" || item.mode === "auto"
+          ? item.mode
+          : "manual"
+      ) as "manual" | "semi-auto" | "auto",
+      executionMode: (item.executionMode === "quota" ? "quota" : "duration") as "duration" | "quota",
+      targetWaterM3PerMu: toNumber(item.targetWaterM3PerMu) ?? undefined,
+      flowRateM3h: toNumber(item.flowRateM3h) ?? undefined,
+      irrigationEfficiency: toNumber(item.irrigationEfficiency) ?? undefined,
+      maxDurationMinutes: toNumber(item.maxDurationMinutes) ?? undefined,
+      splitRounds: item.splitRounds === true,
+      zones: Array.isArray(item.zones)
+        ? item.zones
+            .filter((zone): zone is Record<string, unknown> => isRecord(zone))
+            .map((zone) => ({
+              zoneId: toStringValue(zone.zoneId ?? zone.id),
+              zoneName: toStringValue(zone.zoneName ?? zone.name),
+              siteNumber: toInt(zone.siteNumber) ?? 0,
+              deviceId: toStringValue(zone.deviceId),
+              deviceName: toStringValue(zone.deviceName),
+              order: toInt(zone.order) ?? undefined,
+              durationMinutes: toNumber(zone.durationMinutes) ?? 0,
+              enabled: zone.enabled !== false,
+            }))
+        : [],
+    }))
+    .filter((plan) => plan.id);
+}
+
+function normalizeExecutionPlanZones(
+  plan: TbRotationPlanConfig,
+  deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>,
+) {
+  return plan.zones
+    .filter((zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0)
+    .map((zone) => {
+      const marker = deviceMarkers.find((item) => item.deviceId === zone.deviceId);
+      return {
+        ...zone,
+        deviceName: zone.deviceName || marker?.name || "",
+      };
+    })
+    .filter((zone) => !!zone.deviceName)
+    .sort((left, right) => (left.order ?? left.siteNumber) - (right.order ?? right.siteNumber));
+}
+
+function calculatePlanZoneDurationSeconds(input: {
+  plan: TbRotationPlanConfig;
+  zone: TbRotationPlanConfig["zones"][number];
+  zoneCount: number;
+  areaMu: number;
+  irrigationEfficiency: number;
+}) {
+  if (input.plan.executionMode === "quota") {
+    const safeAreaMu = input.areaMu > 0 ? input.areaMu : 1;
+    const safeZoneCount = Math.max(1, input.zoneCount);
+    const targetWaterM3PerMu = Math.max(0.1, Number(input.plan.targetWaterM3PerMu || 5));
+    const flowRateM3h = Math.max(0.1, Number(input.plan.flowRateM3h || 2));
+    const efficiency = Math.min(
+      1,
+      Math.max(0.1, Number(input.plan.irrigationEfficiency || input.irrigationEfficiency || 0.85)),
+    );
+    const maxMinutes = Math.max(1, Number(input.plan.maxDurationMinutes || input.zone.durationMinutes || 60));
+    const zoneWaterM3 = (safeAreaMu / safeZoneCount) * targetWaterM3PerMu;
+    const minutes = (zoneWaterM3 / flowRateM3h / efficiency) * 60;
+    return Math.max(60, Math.round(Math.min(minutes, maxMinutes) * 60));
+  }
+
+  return Math.max(60, Math.round(Number(input.zone.durationMinutes || 1) * 60));
+}
+
+async function findFieldSchedulerEvent(
+  session: TbSession,
+  fieldId: string,
+  fieldName?: string,
+): Promise<TbSchedulerEventRecord | null> {
+  const expectedName = getFieldSchedulerEventName(fieldName || "");
+  const events = await fetchSchedulerEventRecords(session);
+  const fieldEvents = events.filter(
+    (event) => event.irrigation === "fieldInspect" || event.irrigation === "planTick" || event.name === expectedName,
+  );
+  return (
+    fieldEvents.find((event) => event.fieldId === fieldId) ??
+    fieldEvents.find((event) => fieldName && event.name === expectedName) ??
+    null
+  );
+}
+
+async function fetchSchedulerEventRecords(session: TbSession): Promise<TbSchedulerEventRecord[]> {
+  const rows = (await tbRequest(
+    session,
+    `/api/schedulerEvents?type=${encodeURIComponent(FIELD_SCHEDULER_EVENT_TYPE)}`,
+  )) as unknown[];
+  const records = Array.isArray(rows) ? rows.map(mapSchedulerEventRecord) : [];
+  registerZoneAdvanceCleanupTimers(
+    session,
+    records.filter((event) => event.irrigation === "zoneAdvance"),
+  );
+  return records;
+}
+
+function buildFieldSchedulerEventPayload(
+  fieldId: string,
+  fieldName: string,
+  existing?: TbSchedulerEventRecord | null,
+) {
+  const payload: Record<string, unknown> = {
+    name: getFieldSchedulerEventName(fieldName),
+    type: FIELD_SCHEDULER_EVENT_TYPE,
+    originatorId: {
+      entityType: "ASSET",
+      id: fieldId,
+    },
+    msgType: "CUSTOM",
+    msgBody: {
+      fieldId,
+      fieldName,
+    },
+    metadata: {
+      irrigation: "fieldInspect",
+      fieldId,
+      fieldName,
+    },
+    schedule: {
+      timezone: FIELD_SCHEDULER_TIMEZONE,
+      startTime: getNextSchedulerStartTime(),
+      repeat: {
+        type: "TIMER",
+        endsOn: 0,
+        repeatInterval: FIELD_SCHEDULER_PERIOD_SECONDS,
+        timeUnit: "SECONDS",
+      },
+    },
+    configuration: {
+      originatorId: {
+        entityType: "ASSET",
+        id: fieldId,
+      },
+      msgType: "CUSTOM",
+      msgBody: {
+        fieldId,
+        fieldName,
+      },
+      metadata: {
+        irrigation: "fieldInspect",
+        fieldId,
+        fieldName,
+      },
+    },
+    additionalInfo: {
+      source: "irrigation-web-spa",
+      triggerMode: "fieldInspect",
+      fieldId,
+      fieldName,
+      note: "Root Rule Chain must route metadata.irrigation=fieldInspect to the irrigation rule chain.",
+    },
+  };
+
+  if (existing?.id) {
+    payload.id = {
+      entityType: "SCHEDULER_EVENT",
+      id: existing.id,
+    };
+  }
+
+  return payload;
+}
+
+function buildPlanSchedulerEventPayload(
+  fieldId: string,
+  fieldName: string,
+  plan: TbRotationPlanConfig,
+  existing?: TbSchedulerEventRecord | null,
+) {
+  const payload: Record<string, unknown> = {
+    name: getPlanSchedulerEventName(fieldName, plan.name),
+    type: FIELD_SCHEDULER_EVENT_TYPE,
+    originatorId: {
+      entityType: "ASSET",
+      id: fieldId,
+    },
+    msgType: "CUSTOM",
+    msgBody: {
+      fieldId,
+      fieldName,
+      planId: plan.id,
+      planName: plan.name,
+    },
+    metadata: {
+      irrigation: "planSchedule",
+      fieldId,
+      fieldName,
+      planId: plan.id,
+      planName: plan.name,
+    },
+    schedule: {
+      timezone: FIELD_SCHEDULER_TIMEZONE,
+      startTime: getNextPlanSchedulerStartTime(plan),
+      repeat: buildPlanSchedulerRepeat(plan),
+    },
+    configuration: {
+      originatorId: {
+        entityType: "ASSET",
+        id: fieldId,
+      },
+      msgType: "CUSTOM",
+      msgBody: {
+        fieldId,
+        fieldName,
+        planId: plan.id,
+        planName: plan.name,
+      },
+      metadata: {
+        irrigation: "planSchedule",
+        fieldId,
+        fieldName,
+        planId: plan.id,
+        planName: plan.name,
+      },
+    },
+    additionalInfo: {
+      source: "irrigation-web-spa",
+      triggerMode: "planSchedule",
+      fieldId,
+      fieldName,
+      planId: plan.id,
+      planName: plan.name,
+      scheduleType: plan.scheduleType || "daily",
+      note: "Root Rule Chain must route metadata.irrigation=planSchedule to the irrigation rule chain.",
+    },
+  };
+
+  if (existing?.id) {
+    payload.id = {
+      entityType: "SCHEDULER_EVENT",
+      id: existing.id,
+    };
+  }
+
+  return payload;
+}
+
+function buildPlanZoneAdvanceSchedulerEventPayload(
+  fieldId: string,
+  fieldName: string,
+  plan: TbRotationPlanConfig,
+  zone: TbRotationPlanConfig["zones"][number],
+  zoneIndex: number,
+  offsetSeconds: number,
+  existing?: TbSchedulerEventRecord | null,
+) {
+  const payload = buildZoneAdvanceSchedulerEventPayload(
+    {
+      triggerMode: "planZoneAdvance",
+      fieldId,
+      fieldName,
+      planId: plan.id,
+      planName: plan.name,
+      executionId: "",
+      zoneIndex,
+      zoneName: zone.zoneName ?? `${zone.siteNumber}区`,
+      startTime: getNextPlanSchedulerStartTime(plan) + offsetSeconds * 1000,
+    },
+    existing,
+  );
+
+  payload.schedule = {
+    timezone: FIELD_SCHEDULER_TIMEZONE,
+    startTime: getNextPlanSchedulerStartTime(plan) + offsetSeconds * 1000,
+    repeat: buildPlanSchedulerRepeat(plan),
+  };
+
+  return payload;
+}
+
+function buildZoneAdvanceSchedulerEventPayload(
+  input: {
+    triggerMode: "manualZoneAdvance" | "planZoneAdvance";
+    fieldId: string;
+    fieldName: string;
+    planId: string;
+    planName: string;
+    executionId: string;
+    zoneIndex: number;
+    zoneName: string;
+    startTime: number;
+  },
+  existing?: TbSchedulerEventRecord | null,
+) {
+  const payload: Record<string, unknown> = {
+    name: getZoneAdvanceSchedulerEventName(input.fieldName, input.planName, input.zoneName, input.zoneIndex),
+    type: FIELD_SCHEDULER_EVENT_TYPE,
+    originatorId: {
+      entityType: "ASSET",
+      id: input.fieldId,
+    },
+    msgType: "CUSTOM",
+    msgBody: {
+      fieldId: input.fieldId,
+      fieldName: input.fieldName,
+      planId: input.planId,
+      planName: input.planName,
+      executionId: input.executionId,
+      zoneIndex: input.zoneIndex,
+      schedulerEventId: existing?.id,
+    },
+    metadata: {
+      irrigation: "zoneAdvance",
+      triggerMode: input.triggerMode,
+      fieldId: input.fieldId,
+      fieldName: input.fieldName,
+      planId: input.planId,
+      planName: input.planName,
+      executionId: input.executionId,
+      zoneIndex: input.zoneIndex,
+      schedulerEventId: existing?.id,
+    },
+    schedule: {
+      timezone: FIELD_SCHEDULER_TIMEZONE,
+      startTime: input.startTime,
+    },
+    configuration: {
+      originatorId: {
+        entityType: "ASSET",
+        id: input.fieldId,
+      },
+      msgType: "CUSTOM",
+      msgBody: {
+        fieldId: input.fieldId,
+        fieldName: input.fieldName,
+        planId: input.planId,
+        planName: input.planName,
+        executionId: input.executionId,
+        zoneIndex: input.zoneIndex,
+        schedulerEventId: existing?.id,
+      },
+      metadata: {
+        irrigation: "zoneAdvance",
+        triggerMode: input.triggerMode,
+        fieldId: input.fieldId,
+        fieldName: input.fieldName,
+        planId: input.planId,
+        planName: input.planName,
+        executionId: input.executionId,
+        zoneIndex: input.zoneIndex,
+        schedulerEventId: existing?.id,
+      },
+    },
+    additionalInfo: {
+      source: "irrigation-web-spa",
+      triggerMode: input.triggerMode,
+      fieldId: input.fieldId,
+      fieldName: input.fieldName,
+      planId: input.planId,
+      planName: input.planName,
+      executionId: input.executionId,
+      zoneIndex: input.zoneIndex,
+      zoneName: input.zoneName,
+      note: "一次性分区推进调度，执行后由前端和补偿清理逻辑删除。",
+    },
+  };
+
+  if (existing?.id) {
+    payload.id = {
+      entityType: "SCHEDULER_EVENT",
+      id: existing.id,
+    };
+  }
+
+  return payload;
+}
+
+function getFieldSchedulerEventName(fieldName: string) {
+  return `${FIELD_SCHEDULER_EVENT_PREFIX}${fieldName || "未命名地块"}`;
+}
+
+function getPlanSchedulerEventName(fieldName: string, planName: string) {
+  return `${PLAN_SCHEDULER_EVENT_PREFIX}${fieldName || "未命名地块"} / ${planName || "未命名计划"}`;
+}
+
+function getZoneAdvanceSchedulerEventName(
+  fieldName: string,
+  planName: string,
+  zoneName: string,
+  zoneIndex: number,
+) {
+  return `${ZONE_ADVANCE_SCHEDULER_EVENT_PREFIX}${fieldName || "未命名地块"} / ${planName || "未命名计划"} / ${zoneName || `${zoneIndex + 1}区`}`;
+}
+
+function getNextSchedulerStartTime() {
+  return Math.ceil(Date.now() / 60000) * 60000;
+}
+
+function getNextPlanSchedulerStartTime(plan: TbRotationPlanConfig) {
+  const [hour = 0, minute = 0] = String(plan.startAt || "00:00").split(":").map(Number);
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(hour, minute, 0, 0);
+  if (next.getTime() <= now.getTime()) {
+    next.setDate(next.getDate() + 1);
+  }
+  return next.getTime();
+}
+
+function buildPlanSchedulerRepeat(plan: TbRotationPlanConfig) {
+  if (plan.scheduleType === "interval") {
+    return {
+      type: "TIMER",
+      endsOn: 0,
+      repeatInterval: Math.max(1, plan.intervalDays || 1) * 86400,
+      timeUnit: "SECONDS",
+    };
+  }
+  return {
+    type: "TIMER",
+    endsOn: 0,
+    repeatInterval: 86400,
+    timeUnit: "SECONDS",
+  };
+}
+
+function mapSchedulerEventRecord(raw: unknown): TbSchedulerEventRecord {
+  const item = (raw ?? {}) as Record<string, unknown>;
+  const configuration = normalizeRecord(item.configuration);
+  const metadata = normalizeRecord(configuration.metadata);
+  const payloadMetadata = normalizeRecord(item.metadata);
+  const additionalInfo = normalizeRecord(item.additionalInfo);
+  const schedule = normalizeRecord(item.schedule);
+  const id = extractEntityId(item.id) ?? "";
+  const fieldId =
+    typeof metadata.fieldId === "string"
+      ? metadata.fieldId
+      : typeof payloadMetadata.fieldId === "string"
+        ? payloadMetadata.fieldId
+      : typeof additionalInfo.fieldId === "string"
+        ? additionalInfo.fieldId
+        : undefined;
+  const planId =
+    typeof metadata.planId === "string"
+      ? metadata.planId
+      : typeof payloadMetadata.planId === "string"
+        ? payloadMetadata.planId
+      : typeof additionalInfo.planId === "string"
+        ? additionalInfo.planId
+        : undefined;
+  return {
+    id,
+    name: typeof item.name === "string" ? item.name : "",
+    type: typeof item.type === "string" ? item.type : FIELD_SCHEDULER_EVENT_TYPE,
+    fieldId,
+    fieldName:
+      typeof metadata.fieldName === "string"
+        ? metadata.fieldName
+        : typeof payloadMetadata.fieldName === "string"
+          ? payloadMetadata.fieldName
+        : typeof additionalInfo.fieldName === "string"
+          ? additionalInfo.fieldName
+          : undefined,
+    planId,
+    planName:
+      typeof metadata.planName === "string"
+        ? metadata.planName
+        : typeof payloadMetadata.planName === "string"
+          ? payloadMetadata.planName
+          : typeof additionalInfo.planName === "string"
+            ? additionalInfo.planName
+            : undefined,
+    irrigation:
+      typeof metadata.irrigation === "string"
+        ? metadata.irrigation
+        : typeof payloadMetadata.irrigation === "string"
+          ? payloadMetadata.irrigation
+        : typeof additionalInfo.triggerMode === "string"
+          ? additionalInfo.triggerMode
+          : undefined,
+    triggerMode:
+      typeof payloadMetadata.triggerMode === "string"
+        ? payloadMetadata.triggerMode
+        : typeof metadata.triggerMode === "string"
+          ? metadata.triggerMode
+          : typeof additionalInfo.triggerMode === "string"
+            ? additionalInfo.triggerMode
+            : undefined,
+    executionId:
+      typeof metadata.executionId === "string"
+        ? metadata.executionId
+        : typeof payloadMetadata.executionId === "string"
+          ? payloadMetadata.executionId
+          : typeof additionalInfo.executionId === "string"
+            ? additionalInfo.executionId
+            : undefined,
+    zoneIndex:
+      toInt(metadata.zoneIndex) ??
+      toInt(payloadMetadata.zoneIndex) ??
+      toInt(additionalInfo.zoneIndex) ??
+      undefined,
+    startTime: toInt(schedule.startTime) ?? undefined,
+    createdTime: toInt(item.createdTime) ?? undefined,
+    enabled: typeof item.enabled === "boolean" ? item.enabled : undefined,
+  };
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 async function tbRequest(session: TbSession, path: string, init: RequestInit = {}) {

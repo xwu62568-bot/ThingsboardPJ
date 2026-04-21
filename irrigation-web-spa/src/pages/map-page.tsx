@@ -9,7 +9,12 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 import { useWorkspace } from "@/components/workspace-provider";
-import { saveFieldAssetRecord, type TbFieldAssetConfig } from "@/lib/client/thingsboard";
+import {
+  deleteFieldAssetRecord,
+  saveFieldAssetRecord,
+  saveFieldSchedulerEvent,
+  type TbFieldAssetConfig,
+} from "@/lib/client/thingsboard";
 import type { DeviceSummary } from "@/lib/domain/types";
 import type { FieldSummary } from "@/lib/domain/workspace";
 
@@ -107,6 +112,7 @@ export function MapPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [zoneFormOpen, setZoneFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deletingFieldId, setDeletingFieldId] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [form, setForm] = useState<FieldFormState>(() => buildEmptyForm());
@@ -200,6 +206,19 @@ export function MapPage() {
         name: form.name.trim(),
         config: buildFieldConfig(form, draftBoundary),
       });
+      let schedulerMessage = "";
+      try {
+        await saveFieldSchedulerEvent({
+          session,
+          fieldId: saved.id,
+          fieldName: saved.name,
+        });
+      } catch (schedulerError) {
+        schedulerMessage =
+          schedulerError instanceof Error
+            ? `，但调度器创建失败：${schedulerError.message}`
+            : "，但调度器创建失败";
+      }
       const nextField = buildLocalFieldSummary(saved.id, form, draftBoundary);
       setLocalFields((current) => mergeFields([nextField], current));
       setSelectedFieldId(nextField.id);
@@ -208,7 +227,7 @@ export function MapPage() {
       setZoneForm(buildEmptyZoneForm(nextField));
       setZoneFormOpen(true);
       setDrawingMode("zone");
-      setMessage("地块已保存，请继续在地图上绘制分区");
+      setMessage(`地块已保存${schedulerMessage}，请继续在地图上绘制分区`);
       void refreshFields();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "地块保存失败");
@@ -263,6 +282,36 @@ export function MapPage() {
       setError(saveError instanceof Error ? saveError.message : "分区保存失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const deleteField = async (field: FieldSummary) => {
+    if (!isThingsBoardId(field.id)) {
+      setLocalFields((current) => current.filter((item) => item.id !== field.id));
+      if (selectedFieldId === field.id) {
+        setSelectedFieldId("");
+      }
+      setMessage("地块已从本地列表移除");
+      return;
+    }
+    if (!window.confirm(`确认删除「${field.name}」？删除后地块、分区、计划和策略配置都会从 ThingsBoard 移除。`)) {
+      return;
+    }
+    setDeletingFieldId(field.id);
+    setMessage("");
+    setError("");
+    try {
+      await deleteFieldAssetRecord({ session, fieldId: field.id });
+      setLocalFields((current) => current.filter((item) => item.id !== field.id));
+      if (selectedFieldId === field.id) {
+        setSelectedFieldId("");
+      }
+      await refreshFields();
+      setMessage("地块已删除");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "地块删除失败");
+    } finally {
+      setDeletingFieldId("");
     }
   };
 
@@ -329,8 +378,10 @@ export function MapPage() {
             />
           ) : (
             <SelectedFieldPanel
+              deleting={selectedField ? deletingFieldId === selectedField.id : false}
               selectedField={selectedField}
               onCreateZone={startZoneCreate}
+              onDeleteField={deleteField}
             />
           )}
         </aside>
@@ -382,9 +433,9 @@ export function MapPage() {
 
             <div className="fieldMetricsBar">
               <span>湿度 {field.soilMoisture}%</span>
-              <span>标准蒸散 {field.et0.toFixed(1)}</span>
-              <span>作物系数 {field.kc.toFixed(2)}</span>
-              <span>作物蒸散 {field.etc.toFixed(2)}</span>
+              <span>ET0 {field.et0.toFixed(1)}</span>
+              <span>Kc {field.kc.toFixed(2)}</span>
+              <span>ETc {field.etc.toFixed(2)}</span>
             </div>
             <div className="fieldCardActions">
               <button
@@ -404,6 +455,17 @@ export function MapPage() {
               >
                 查看详情
               </Link>
+              <button
+                className="ghostButton dangerButton"
+                type="button"
+                disabled={deletingFieldId === field.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void deleteField(field);
+                }}
+              >
+                {deletingFieldId === field.id ? "删除中..." : "删除"}
+              </button>
             </div>
           </article>
         ))}
@@ -713,11 +775,15 @@ function MockFieldMap({
 }
 
 function SelectedFieldPanel({
+  deleting,
   selectedField,
   onCreateZone,
+  onDeleteField,
 }: {
+  deleting: boolean;
   selectedField?: FieldSummary;
   onCreateZone: () => void;
+  onDeleteField: (field: FieldSummary) => void;
 }) {
   if (!selectedField) {
     return (
@@ -754,15 +820,15 @@ function SelectedFieldPanel({
           <strong>{selectedField.soilMoisture}%</strong>
         </div>
         <div>
-          <span>标准蒸散</span>
+          <span>参考 ET0</span>
           <strong>{selectedField.et0.toFixed(1)}</strong>
         </div>
         <div>
-          <span>作物系数</span>
+          <span>作物系数 Kc</span>
           <strong>{selectedField.kc.toFixed(2)}</strong>
         </div>
         <div>
-          <span>作物蒸散</span>
+          <span>作物 ETc</span>
           <strong>{selectedField.etc.toFixed(2)}</strong>
         </div>
         <div>
@@ -780,6 +846,14 @@ function SelectedFieldPanel({
         <Link className="primaryButton" to={`/fields/${selectedField.id}`}>
           编辑详情
         </Link>
+        <button
+          className="ghostButton dangerButton"
+          type="button"
+          disabled={deleting}
+          onClick={() => onDeleteField(selectedField)}
+        >
+          {deleting ? "删除中..." : "删除地块"}
+        </button>
       </div>
     </div>
   );
@@ -1127,6 +1201,8 @@ function buildLocalFieldSummary(
     et0: 0,
     kc,
     etc: 0,
+    et0UpdatedAt: 0,
+    et0Source: "",
   };
 }
 

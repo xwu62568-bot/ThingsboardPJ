@@ -8,7 +8,7 @@ import {
 } from "@/lib/client/thingsboard";
 import type { FieldSummary, StrategySummary } from "@/lib/domain/workspace";
 
-type StrategyType = "threshold" | "quota" | "etc";
+type StrategyType = "threshold" | "etc";
 
 type StrategyFormState = {
   id?: string;
@@ -27,6 +27,7 @@ type StrategyFormState = {
   irrigationEfficiency: string;
   effectiveRainfallRatio: string;
   replenishRatio: string;
+  executionMode: "duration" | "quota" | "etc";
   minIntervalHours: string;
   maxDurationMinutes: string;
   splitRounds: boolean;
@@ -36,7 +37,6 @@ type StrategyFormState = {
 
 const STRATEGY_TYPES: Array<{ type: StrategyType; title: string; desc: string }> = [
   { type: "threshold", title: "阈值灌溉", desc: "根据土壤湿度下限和恢复阈值触发灌溉。" },
-  { type: "quota", title: "定量灌溉", desc: "按目标水量、面积、流量和效率计算执行量。" },
   { type: "etc", title: "ETc 灌溉", desc: "按 ET0、作物系数、有效降雨和缺水阈值决策。" },
 ];
 
@@ -206,6 +206,7 @@ export function StrategiesPage() {
                     setForm((current) => ({
                       ...current,
                       type: item.type,
+                      executionMode: item.type === "etc" ? "etc" : current.executionMode === "etc" ? "duration" : current.executionMode,
                       name:
                         !current.name || STRATEGY_TYPES.some((type) => current.name.includes(type.title))
                           ? `${selectedField?.name ?? ""} ${item.title}`
@@ -304,10 +305,8 @@ export function StrategiesPage() {
             {form.type === "threshold" ? (
               <ThresholdFields form={form} setForm={setForm} />
             ) : null}
-            {form.type === "quota" ? (
-              <QuotaFields form={form} setForm={setForm} />
-            ) : null}
             {form.type === "etc" ? <EtcFields form={form} setForm={setForm} /> : null}
+            <ExecutionFields form={form} setForm={setForm} />
 
             <label>
               <span>最短触发间隔（小时）</span>
@@ -463,15 +462,44 @@ function ThresholdFields({
   );
 }
 
-function QuotaFields({
+function ExecutionFields({
   form,
   setForm,
 }: {
   form: StrategyFormState;
   setForm: Dispatch<SetStateAction<StrategyFormState>>;
 }) {
+  const executionOptions =
+    form.type === "etc"
+      ? [
+          { value: "etc", label: "按 ETc 缺水量" },
+          { value: "quota", label: "定量灌溉" },
+          { value: "duration", label: "按时长" },
+        ]
+      : [
+          { value: "duration", label: "按时长" },
+          { value: "quota", label: "定量灌溉" },
+        ];
+
   return (
     <>
+      <label>
+        <span>执行方式</span>
+        <select
+          value={form.executionMode}
+          onChange={(event) =>
+            setFormValue(setForm, "executionMode", event.target.value as StrategyFormState["executionMode"])
+          }
+        >
+          {executionOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {form.executionMode === "quota" ? (
+        <>
       <label>
         <span>目标水量（m³/亩）</span>
         <input
@@ -515,6 +543,21 @@ function QuotaFields({
         />
         <span>允许拆分多轮执行</span>
       </label>
+        </>
+      ) : null}
+      {form.executionMode === "duration" ? (
+        <label>
+          <span>固定执行时长（分钟）</span>
+          <input
+            min="1"
+            max="360"
+            step="1"
+            type="number"
+            value={form.maxDurationMinutes}
+            onChange={(event) => setFormValue(setForm, "maxDurationMinutes", event.target.value)}
+          />
+        </label>
+      ) : null}
     </>
   );
 }
@@ -593,6 +636,7 @@ function buildEmptyForm(field?: FieldSummary): StrategyFormState {
     irrigationEfficiency: "0.85",
     effectiveRainfallRatio: "0.7",
     replenishRatio: "0.8",
+    executionMode: "duration",
     minIntervalHours: "12",
     maxDurationMinutes: "60",
     splitRounds: true,
@@ -619,6 +663,7 @@ function mapStrategyToForm(strategy: StrategySummary): StrategyFormState {
     irrigationEfficiency: String(strategy.irrigationEfficiency),
     effectiveRainfallRatio: String(strategy.effectiveRainfallRatio),
     replenishRatio: String(strategy.replenishRatio),
+    executionMode: strategy.executionMode,
     minIntervalHours: String(strategy.minIntervalHours),
     maxDurationMinutes: String(strategy.maxDurationMinutes),
     splitRounds: strategy.splitRounds,
@@ -651,6 +696,7 @@ function buildStrategyConfig(
     irrigationEfficiency: clampNumber(Number(form.irrigationEfficiency), 0.1, 1),
     effectiveRainfallRatio: clampNumber(Number(form.effectiveRainfallRatio), 0, 1),
     replenishRatio: clampNumber(Number(form.replenishRatio), 0.1, 1),
+    executionMode: form.executionMode,
     minIntervalHours: clampNumber(Number(form.minIntervalHours), 1, 168),
     maxDurationMinutes: clampNumber(Number(form.maxDurationMinutes), 1, 360),
     splitRounds: form.splitRounds,
@@ -680,6 +726,7 @@ function mapSummaryToConfig(
     irrigationEfficiency: strategy.irrigationEfficiency,
     effectiveRainfallRatio: strategy.effectiveRainfallRatio,
     replenishRatio: strategy.replenishRatio,
+    executionMode: strategy.executionMode,
     minIntervalHours: strategy.minIntervalHours,
     maxDurationMinutes: strategy.maxDurationMinutes,
     splitRounds: strategy.splitRounds,
@@ -743,8 +790,8 @@ function validateStrategyForm(form: StrategyFormState, field: FieldSummary) {
   if (form.type === "threshold" && Number(form.moistureRecover) <= Number(form.moistureMin)) {
     throw new Error("恢复阈值必须大于土壤湿度下限");
   }
-  if (form.type === "quota" && field.areaMu <= 0) {
-    throw new Error("定量灌溉需要地块面积大于 0");
+  if (form.executionMode === "quota" && field.areaMu <= 0) {
+    throw new Error("定量执行需要地块面积大于 0");
   }
 }
 
@@ -778,34 +825,23 @@ function toggleZone(
 }
 
 function buildStrategyMetrics(strategy: StrategySummary) {
-  if (strategy.type === "quota") {
-    return [
-      { label: "目标水量", value: `${strategy.targetWaterM3PerMu.toFixed(1)} m³/亩` },
-      { label: "分区流量", value: `${strategy.flowRateM3h.toFixed(1)} m³/h` },
-      { label: "灌溉效率", value: strategy.irrigationEfficiency.toFixed(2) },
-      { label: "最长时长", value: `${strategy.maxDurationMinutes} 分钟` },
-    ];
-  }
   if (strategy.type === "etc") {
     return [
       { label: "缺水阈值", value: `${strategy.etcTriggerMm.toFixed(1)} mm` },
       { label: "补水比例", value: `${Math.round(strategy.replenishRatio * 100)}%` },
-      { label: "有效降雨", value: `${Math.round(strategy.effectiveRainfallRatio * 100)}%` },
+      { label: "执行方式", value: formatExecutionMode(strategy.executionMode) },
       { label: "雨天锁定", value: strategy.rainLockEnabled ? "开启" : "关闭" },
     ];
   }
   return [
     { label: "墒情下限", value: `${strategy.moistureMin}%` },
     { label: "恢复阈值", value: `${strategy.moistureRecover}%` },
-    { label: "最短间隔", value: `${strategy.minIntervalHours} 小时` },
+    { label: "执行方式", value: formatExecutionMode(strategy.executionMode) },
     { label: "雨天锁定", value: strategy.rainLockEnabled ? "开启" : "关闭" },
   ];
 }
 
 function formatStrategyPrimaryValue(strategy: StrategySummary) {
-  if (strategy.type === "quota") {
-    return `目标 ${strategy.targetWaterM3PerMu.toFixed(1)} m³/亩`;
-  }
   if (strategy.type === "etc") {
     return `累计缺水 >= ${strategy.etcTriggerMm.toFixed(1)} mm`;
   }
@@ -829,12 +865,21 @@ function isThingsBoardId(value: string) {
 
 function formatStrategyType(type: StrategyType) {
   switch (type) {
-    case "quota":
-      return "定量灌溉";
     case "etc":
       return "ETc 灌溉";
     default:
       return "阈值灌溉";
+  }
+}
+
+function formatExecutionMode(mode: StrategySummary["executionMode"]) {
+  switch (mode) {
+    case "quota":
+      return "定量灌溉";
+    case "etc":
+      return "按缺水量";
+    default:
+      return "按时长";
   }
 }
 

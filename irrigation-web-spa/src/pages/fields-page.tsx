@@ -1,7 +1,7 @@
 import { useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import { Link } from "react-router-dom";
 import { useWorkspace } from "@/components/workspace-provider";
-import { saveFieldAssetRecord, type TbFieldAssetConfig } from "@/lib/client/thingsboard";
+import { saveFieldAssetRecord, saveFieldSchedulerEvent, type TbFieldAssetConfig } from "@/lib/client/thingsboard";
 import type { FieldSummary } from "@/lib/domain/workspace";
 
 type FieldFormState = {
@@ -60,15 +60,30 @@ export function FieldsPage() {
     setError("");
     setMessage("");
     try {
-      await saveFieldAssetRecord({
+      const saved = await saveFieldAssetRecord({
         session,
         id: form.id,
         name: form.name.trim(),
         config: buildFieldConfig(form),
       });
+      let schedulerMessage = "";
+      if (!form.id) {
+        try {
+          await saveFieldSchedulerEvent({
+            session,
+            fieldId: saved.id,
+            fieldName: saved.name,
+          });
+        } catch (schedulerError) {
+          schedulerMessage =
+            schedulerError instanceof Error
+              ? `，但调度器创建失败：${schedulerError.message}`
+              : "，但调度器创建失败";
+        }
+      }
       await refreshFields();
       setFormOpen(false);
-      setMessage("地块已保存到 ThingsBoard");
+      setMessage(`地块已保存到 ThingsBoard${schedulerMessage}`);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "地块保存失败");
     } finally {
@@ -263,9 +278,9 @@ export function FieldsPage() {
 
             <div className="fieldMetricsBar">
               <span>湿度 {field.soilMoisture}%</span>
-              <span>标准蒸散 {field.et0.toFixed(1)}</span>
-              <span>作物系数 {field.kc.toFixed(2)}</span>
-              <span>作物蒸散 {field.etc.toFixed(2)}</span>
+              <span>ET0 {field.et0.toFixed(1)}</span>
+              <span>Kc {field.kc.toFixed(2)}</span>
+              <span>ETc {field.etc.toFixed(2)}</span>
             </div>
             <div className="fieldCardActions">
               <Link className="inlineLink" to={`/fields/${field.id}`}>
