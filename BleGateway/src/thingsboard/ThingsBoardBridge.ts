@@ -451,60 +451,123 @@ export class ThingsBoardBridge {
   private async handleValvePlaceholder(
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const deviceName = typeof params.deviceName === 'string' ? params.deviceName.trim() : '';
-    const stationId =
-      typeof params.stationId === 'string'
-        ? params.stationId.trim()
-        : typeof params.stationId === 'number'
-          ? String(params.stationId)
-          : '';
-    const manualDurationSeconds =
-      typeof params.manualDurationSeconds === 'number'
-        ? params.manualDurationSeconds
-        : typeof params.manualDurationSeconds === 'string'
-          ? Number.parseInt(params.manualDurationSeconds, 10)
-          : undefined;
     console.log('[TB-BRIDGE] handle openValve', params);
-    if (stationId !== '0' && stationId !== '1') {
-      throw new Error('openValve requires params.stationId to be "1" or "0"');
+    const commandRequests = this.normalizeValveCommandRequests(params);
+    const results: Array<Record<string, unknown>> = [];
+    for (const request of commandRequests) {
+      results.push(await this.executeValveCommand(request));
     }
 
-    const siteNumber =
-      typeof params.siteNumber === 'number'
-        ? params.siteNumber
-        : typeof params.siteNumber === 'string'
-          ? Number.parseInt(params.siteNumber, 10)
-          : 1;
+    // Keep protocol referenced until the device-side custom frame parser is fully unified.
+    void this.protocol;
 
+    if (results.length === 1) {
+      return results[0] ?? { message: 'valve-command-sent' };
+    }
+    return {
+      message: 'valve-batch-command-sent',
+      commandCount: results.length,
+      results,
+    };
+  }
+
+  private normalizeValveCommandRequests(params: Record<string, unknown>): Array<{
+    deviceName: string;
+    stationId: '0' | '1';
+    siteNumber: number;
+    manualDurationSeconds?: number;
+  }> {
+    const rawCommands = Array.isArray(params.commands) ? params.commands : [];
+    if (rawCommands.length > 0) {
+      const normalized = rawCommands
+        .map((command) => this.parseValveCommandRequest(command, params))
+        .filter((command): command is NonNullable<typeof command> => Boolean(command));
+      if (normalized.length === 0) {
+        throw new Error('openValve requires at least one valid command in params.commands');
+      }
+      return normalized;
+    }
+
+    const single = this.parseValveCommandRequest(params, params);
+    if (!single) {
+      throw new Error('openValve requires params.deviceName and a valid siteNumber');
+    }
+    return [single];
+  }
+
+  private parseValveCommandRequest(
+    value: unknown,
+    fallbackParams: Record<string, unknown>,
+  ): {
+    deviceName: string;
+    stationId: '0' | '1';
+    siteNumber: number;
+    manualDurationSeconds?: number;
+  } | null {
+    if (!this.isRecord(value)) {
+      return null;
+    }
+    const deviceName = this.readString(value.deviceName) || this.readString(fallbackParams.deviceName);
+    const stationIdValue =
+      this.readString(value.stationId) ||
+      this.readString(fallbackParams.stationId) ||
+      '1';
+    const stationId = stationIdValue === '0' ? '0' : stationIdValue === '1' ? '1' : null;
+    if (!stationId) {
+      throw new Error('openValve requires stationId to be "1" or "0"');
+    }
+    const siteNumber =
+      this.readInteger(value.siteNumber) ?? this.readInteger(fallbackParams.siteNumber) ?? 1;
     if (!Number.isInteger(siteNumber) || siteNumber < 1 || siteNumber > 8) {
       throw new Error('openValve optional params.siteNumber must be 1-8');
     }
-
-    const targetDeviceName = deviceName || this.resolveSingleConnectedDeviceName();
-    const activeDevice = await this.ensureBleDeviceConnected(targetDeviceName || undefined);
-    const deviceContext = this.getOrCreateDeviceContext(activeDevice.deviceName);
-
-    const open = stationId === '1';
-    deviceContext.selectedSiteNumber = siteNumber;
-    deviceContext.siteCount = Math.max(
-      this.resolveDeviceSiteCount(activeDevice.deviceName, params, deviceContext.siteCount),
+    const manualDurationSeconds =
+      this.readInteger(value.manualDurationSeconds) ??
+      this.readInteger(fallbackParams.manualDurationSeconds) ??
+      undefined;
+    const targetDeviceName = deviceName || this.resolveSingleConnectedDeviceName() || '';
+    if (!targetDeviceName) {
+      throw new Error('openValve requires params.deviceName');
+    }
+    return {
+      deviceName: targetDeviceName,
+      stationId,
       siteNumber,
+      manualDurationSeconds,
+    };
+  }
+
+  private async executeValveCommand(request: {
+    deviceName: string;
+    stationId: '0' | '1';
+    siteNumber: number;
+    manualDurationSeconds?: number;
+  }): Promise<Record<string, unknown>> {
+    const activeDevice = await this.ensureBleDeviceConnected(request.deviceName);
+    const deviceContext = this.getOrCreateDeviceContext(activeDevice.deviceName);
+    const open = request.stationId === '1';
+    deviceContext.selectedSiteNumber = request.siteNumber;
+    deviceContext.siteCount = Math.max(
+      this.resolveDeviceSiteCount(activeDevice.deviceName, request as unknown as Record<string, unknown>, deviceContext.siteCount),
+      request.siteNumber,
     );
-    let commandHexes: string[] = [];
-    if (open && manualDurationSeconds !== undefined) {
+
+    const commandHexes: string[] = [];
+    if (open && request.manualDurationSeconds !== undefined) {
       const durationBytes = buildManualDurationCommand(
         deviceContext.siteCount,
-        siteNumber,
-        manualDurationSeconds,
+        request.siteNumber,
+        request.manualDurationSeconds,
       );
       this.pendingSendCommands.set(durationBytes[4] ?? 0, {
         type: 'duration',
         deviceName: activeDevice.deviceName,
-        siteNumber,
+        siteNumber: request.siteNumber,
       });
       console.log('[TB-BRIDGE] valve duration command encoded', {
-        siteNumber,
-        manualDurationSeconds,
+        deviceName: activeDevice.deviceName,
+        siteNumber: request.siteNumber,
+        manualDurationSeconds: request.manualDurationSeconds,
         siteCount: deviceContext.siteCount,
         bytesHex: bytesToHex(durationBytes),
       });
@@ -515,25 +578,26 @@ export class ThingsBoardBridge {
       });
       console.log('[TB-BRIDGE] valve duration written to ble', {
         deviceName: activeDevice.deviceName,
-        siteNumber,
+        siteNumber: request.siteNumber,
         connectedDeviceId: activeDevice.deviceId,
       });
       commandHexes.push(bytesToHex(durationBytes));
       await sleep(200);
     }
 
-    const onOffBytes = buildSiteOnOffCommand(siteNumber, open);
+    const onOffBytes = buildSiteOnOffCommand(request.siteNumber, open);
     this.pendingSendCommands.set(onOffBytes[4] ?? 0, {
       type: 'valve',
       deviceName: activeDevice.deviceName,
-      siteNumber,
+      siteNumber: request.siteNumber,
       open,
     });
     console.log('[TB-BRIDGE] valve command encoded', {
-      siteNumber,
-      stationId,
+      deviceName: activeDevice.deviceName,
+      siteNumber: request.siteNumber,
+      stationId: request.stationId,
       open,
-      manualDurationSeconds,
+      manualDurationSeconds: request.manualDurationSeconds,
       bytesHex: bytesToHex(onOffBytes),
     });
     await this.bleService.write(onOffBytes, {
@@ -543,36 +607,34 @@ export class ThingsBoardBridge {
     });
     console.log('[TB-BRIDGE] valve command written to ble', {
       deviceName: activeDevice.deviceName,
-      siteNumber,
-      stationId,
+      siteNumber: request.siteNumber,
+      stationId: request.stationId,
       connectedDeviceId: activeDevice.deviceId,
     });
     commandHexes.push(bytesToHex(onOffBytes));
     await this.client.publishChildTelemetry(activeDevice.deviceName, {
       ts: Date.now(),
       values: {
-        lastValveSiteNumber: siteNumber,
+        lastValveSiteNumber: request.siteNumber,
         lastValveCommand: open ? 'open' : 'close',
-        lastValveStationId: stationId,
+        lastValveStationId: request.stationId,
       },
     });
     await this.publishRpcValveControlState({
       deviceName: activeDevice.deviceName,
-      siteNumber,
+      siteNumber: request.siteNumber,
       open,
-      manualDurationSeconds,
+      manualDurationSeconds: request.manualDurationSeconds,
     });
     setTimeout(() => {
       this.requestDeviceSnapshot(activeDevice.deviceId).catch((error) => this.client.setError(error));
     }, 1200);
 
-    // Keep protocol referenced until the device-side custom frame parser is fully unified.
-    void this.protocol;
-
     return {
       message: open ? 'valve-open-command-sent' : 'valve-close-command-sent',
-      siteNumber,
-      stationId,
+      deviceName: activeDevice.deviceName,
+      siteNumber: request.siteNumber,
+      stationId: request.stationId,
       bytesHex: commandHexes.join(' | '),
     };
   }
@@ -1327,6 +1389,31 @@ export class ThingsBoardBridge {
       return undefined;
     }
     return parsed;
+  }
+
+  private readString(value: unknown): string {
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+    return '';
+  }
+
+  private readInteger(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isInteger(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isInteger(parsed) ? parsed : undefined;
+    }
+    return undefined;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
   private getConnectionStateText(

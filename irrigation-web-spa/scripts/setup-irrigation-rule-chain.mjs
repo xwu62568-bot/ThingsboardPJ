@@ -1595,14 +1595,32 @@ function normalizeStrategyZones(strategy) {
     }
     return strategy.scope !== "zones" || scopedIds.indexOf(zone.id) >= 0;
   }).map(function(zone, index) {
-    var binding = Array.isArray(zone.deviceBindings) && zone.deviceBindings.length > 0 ? zone.deviceBindings[0] : null;
-    var deviceId = zone.deviceId || (binding && binding.deviceId) || "";
-    var siteNumber = Number(zone.siteNumber || zone.valveSiteNumber || (binding && binding.siteNumber) || 0);
+    var bindings = Array.isArray(zone.deviceBindings)
+      ? zone.deviceBindings.filter(function(binding) {
+          return binding && binding.deviceId && Number(binding.siteNumber) > 0;
+        }).map(function(binding) {
+          return {
+            deviceId: binding.deviceId,
+            siteNumber: Number(binding.siteNumber),
+            deviceName: binding.deviceName || ""
+          };
+        })
+      : [];
+    if (!bindings.length) {
+      var fallbackDeviceId = zone.deviceId || "";
+      var fallbackSiteNumber = Number(zone.siteNumber || zone.valveSiteNumber || 0);
+      if (fallbackDeviceId && fallbackSiteNumber > 0) {
+        bindings.push({
+          deviceId: fallbackDeviceId,
+          siteNumber: fallbackSiteNumber,
+          deviceName: zone.deviceName || ""
+        });
+      }
+    }
     return {
       zoneId: zone.id,
       zoneName: zone.name,
-      deviceId: deviceId,
-      siteNumber: siteNumber,
+      deviceBindings: bindings,
       order: index + 1,
       durationMinutes: Number(strategy.maxDurationMinutes || 10),
       enabled: true
@@ -1614,24 +1632,60 @@ function normalizeStrategyZones(strategy) {
 function normalizeExecutableZones(sourceZones) {
   return sourceZones
     .filter(function(zone) {
-      return zone && zone.enabled !== false && zone.deviceId && Number(zone.siteNumber) > 0;
+      if (!zone || zone.enabled === false) {
+        return false;
+      }
+      var bindings = Array.isArray(zone.deviceBindings) ? zone.deviceBindings : [];
+      if (bindings.length > 0) {
+        return bindings.some(function(binding) {
+          return binding && binding.deviceId && Number(binding.siteNumber) > 0;
+        });
+      }
+      return zone.deviceId && Number(zone.siteNumber) > 0;
     })
     .map(function(zone) {
-      if (zone.deviceName) {
-        return zone;
-      }
-      var marker = deviceMarkers.find(function(item) {
-        return item && item.deviceId === zone.deviceId;
-      });
       var next = {};
       for (var key in zone) {
         next[key] = zone[key];
       }
-      next.deviceName = marker && marker.name ? marker.name : "";
+      var bindings = Array.isArray(zone.deviceBindings) ? zone.deviceBindings : [];
+      if (!bindings.length && zone.deviceId && Number(zone.siteNumber) > 0) {
+        bindings = [{
+          deviceId: zone.deviceId,
+          siteNumber: Number(zone.siteNumber),
+          deviceName: zone.deviceName || ""
+        }];
+      }
+      next.deviceBindings = bindings
+        .filter(function(binding) {
+          return binding && binding.deviceId && Number(binding.siteNumber) > 0;
+        })
+        .map(function(binding) {
+          var marker = deviceMarkers.find(function(item) {
+            return item && item.deviceId === binding.deviceId;
+          });
+          return {
+            deviceId: binding.deviceId,
+            siteNumber: Number(binding.siteNumber),
+            deviceName: binding.deviceName || (marker && marker.name ? marker.name : "")
+          };
+        })
+        .filter(function(binding) {
+          return !!binding.deviceName;
+        });
+      if (!next.deviceBindings.length) {
+        return null;
+      }
+      next.deviceIds = next.deviceBindings.map(function(binding) {
+        return binding.deviceId;
+      });
+      next.deviceId = next.deviceBindings[0].deviceId;
+      next.siteNumber = next.deviceBindings[0].siteNumber;
+      next.deviceName = next.deviceBindings[0].deviceName;
       return next;
     })
     .filter(function(zone) {
-      return !!zone.deviceName;
+      return !!zone && Array.isArray(zone.deviceBindings) && zone.deviceBindings.length > 0;
     })
     .sort(function(left, right) {
       return Number(left.order || left.siteNumber || 0) - Number(right.order || right.siteNumber || 0);
@@ -1838,14 +1892,51 @@ if (zoneIndex >= zones.length) {
 
 var zone = zones[zoneIndex];
 var durationSeconds = calculateDurationSeconds(selectedPlan, zone, zones.length, policy);
+var zoneCommands = Array.isArray(zone.deviceBindings)
+  ? zone.deviceBindings.map(function(binding, bindingIndex) {
+      return {
+        method: "openValve",
+        deviceId: binding.deviceId,
+        deviceName: binding.deviceName,
+        order: bindingIndex + 1,
+        params: {
+          stationId: "1",
+          siteNumber: Number(binding.siteNumber),
+          manualDurationSeconds: durationSeconds
+        }
+      };
+    }).filter(function(command) {
+      return !!command.deviceName && Number(command.params.siteNumber) > 0;
+    })
+  : [];
+var primaryCommand = zoneCommands.length > 0 ? zoneCommands[0] : null;
+if (!primaryCommand) {
+  msg.skipReason = "分区未绑定可执行设备";
+  msg.debug.selectedPlanId = selectedPlan.id;
+  msg.debug.selectedPlanName = selectedPlan.name;
+  msg.debug.selectedSource = selectedSource || selectedPlan.source || "plan";
+  msg.debug.zoneCount = zones.length;
+  msg.debug.zoneIndex = zoneIndex;
+  msg.debug.skipReason = msg.skipReason;
+  return { msg: msg, metadata: metadata, msgType: msgType };
+}
 msg.nextCommand = {
-  method: "openValve",
-  deviceId: zone.deviceId,
-  deviceName: zone.deviceName,
+  method: primaryCommand.method,
+  deviceId: primaryCommand.deviceId,
+  deviceName: primaryCommand.deviceName,
   params: {
     stationId: "1",
-    siteNumber: Number(zone.siteNumber),
-    manualDurationSeconds: durationSeconds
+    siteNumber: Number(primaryCommand.params.siteNumber),
+    manualDurationSeconds: durationSeconds,
+    commands: zoneCommands.map(function(command) {
+      return {
+        deviceId: command.deviceId,
+        deviceName: command.deviceName,
+        stationId: command.params.stationId,
+        siteNumber: command.params.siteNumber,
+        manualDurationSeconds: command.params.manualDurationSeconds
+      };
+    })
   },
   planId: selectedPlan.id,
   planName: selectedPlan.name,
@@ -1859,7 +1950,9 @@ msg.nextCommand = {
   zoneName: zone.zoneName,
   zoneIndex: zoneIndex,
   order: zone.order,
-  durationSeconds: durationSeconds
+  durationSeconds: durationSeconds,
+  deviceIds: zoneCommands.map(function(command) { return command.deviceId; }),
+  deviceNames: zoneCommands.map(function(command) { return command.deviceName; })
 };
 msg.executionState = {
   planId: selectedPlan.id,
@@ -1883,8 +1976,9 @@ msg.debug.selectedPlanName = selectedPlan.name;
 msg.debug.selectedSource = selectedSource || selectedPlan.source || "plan";
 msg.debug.zoneCount = zones.length;
 msg.debug.zoneIndex = zoneIndex;
-msg.debug.nextDeviceName = zone.deviceName;
-msg.debug.nextSiteNumber = zone.siteNumber;
+msg.debug.nextDeviceName = primaryCommand.deviceName;
+msg.debug.nextSiteNumber = primaryCommand.params.siteNumber;
+msg.debug.commandCount = zoneCommands.length;
 msg.debug.durationSeconds = durationSeconds;
 if (selectedPlan.source === "strategy" && selectedPlan.strategyId) {
   var automationState = toObject(metadata.automationExecutionState || metadata.ss_automationExecutionState || msg.automationExecutionState || msg.ss_automationExecutionState);

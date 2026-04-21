@@ -112,6 +112,7 @@ let amapLoadingPromise: Promise<AMapConstructor> | null = null;
 export function MapPage() {
   const { session, devices, fields, refreshFields } = useWorkspace();
   const [localFields, setLocalFields] = useState<FieldSummary[]>([]);
+  const [deletedFieldIds, setDeletedFieldIds] = useState<string[]>([]);
   const [drawingMode, setDrawingMode] = useState<"field" | "zone" | null>(null);
   const [draftBoundary, setDraftBoundary] = useState<BoundaryPoint[]>([]);
   const [formOpen, setFormOpen] = useState(false);
@@ -122,7 +123,10 @@ export function MapPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState<FieldFormState>(() => buildEmptyForm());
   const [zoneForm, setZoneForm] = useState<ZoneFormState>(() => buildEmptyZoneForm());
-  const mapFields = useMemo(() => mergeFields(fields, localFields), [fields, localFields]);
+  const mapFields = useMemo(
+    () => mergeFields(fields, localFields).filter((field) => !deletedFieldIds.includes(field.id)),
+    [deletedFieldIds, fields, localFields],
+  );
   const draftDeviceMarkers = useMemo(
     () =>
       zoneForm.deviceBindings
@@ -320,6 +324,7 @@ export function MapPage() {
   const deleteField = async (field: FieldSummary) => {
     if (!isThingsBoardId(field.id)) {
       setLocalFields((current) => current.filter((item) => item.id !== field.id));
+      setDeletedFieldIds((current) => [...current, field.id]);
       if (selectedFieldId === field.id) {
         setSelectedFieldId("");
       }
@@ -332,6 +337,7 @@ export function MapPage() {
     setDeletingFieldId(field.id);
     setMessage("");
     setError("");
+    setDeletedFieldIds((current) => [...current, field.id]);
     try {
       await deleteFieldAssetRecord({ session, fieldId: field.id });
       setLocalFields((current) => current.filter((item) => item.id !== field.id));
@@ -341,11 +347,19 @@ export function MapPage() {
       await refreshFields();
       setMessage("地块已删除");
     } catch (deleteError) {
+      setDeletedFieldIds((current) => current.filter((item) => item !== field.id));
       setError(deleteError instanceof Error ? deleteError.message : "地块删除失败");
     } finally {
       setDeletingFieldId("");
     }
   };
+
+  useEffect(() => {
+    if (deletedFieldIds.length === 0) {
+      return;
+    }
+    setDeletedFieldIds((current) => current.filter((fieldId) => fields.some((field) => field.id === fieldId)));
+  }, [deletedFieldIds.length, fields]);
 
   useEffect(() => {
     const onCreateField = () => startCreate();

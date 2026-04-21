@@ -83,6 +83,12 @@ export type IrrigationPlanSummary = {
     zoneName?: string;
     siteNumber: number;
     deviceId?: string;
+    deviceIds?: string[];
+    deviceBindings?: Array<{
+      deviceId: string;
+      siteNumber?: number;
+      deviceName?: string;
+    }>;
     deviceName?: string;
     order?: number;
     durationMinutes: number;

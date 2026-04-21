@@ -255,6 +255,12 @@ export type TbRotationPlanConfig = {
     zoneName?: string;
     siteNumber: number;
     deviceId?: string;
+    deviceIds?: string[];
+    deviceBindings?: Array<{
+      deviceId: string;
+      siteNumber?: number;
+      deviceName?: string;
+    }>;
     deviceName?: string;
     order?: number;
     durationMinutes: number;
@@ -675,9 +681,7 @@ export async function syncFieldPlanSchedulerEvents(input: {
     if (!plan) {
       return true;
     }
-    const executableZones = plan.zones.filter(
-      (zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0,
-    );
+    const executableZones = normalizeExecutionPlanZones(plan, [], []);
     return event.zoneIndex === undefined || event.zoneIndex < 1 || event.zoneIndex >= executableZones.length;
   });
 
@@ -695,9 +699,7 @@ export async function syncFieldPlanSchedulerEvents(input: {
       body: JSON.stringify(buildPlanSchedulerEventPayload(input.fieldId, input.fieldName, plan, existing)),
     });
 
-    const executableZones = plan.zones
-      .filter((zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0)
-      .sort((left, right) => (left.order ?? left.siteNumber) - (right.order ?? right.siteNumber));
+    const executableZones = normalizeExecutionPlanZones(plan, [], []);
     if (executableZones.length <= 1) {
       continue;
     }
@@ -781,7 +783,11 @@ export async function requestManualPlanExecution(input: {
   if (!selectedPlan) {
     throw new Error("未找到要执行的轮灌计划，请先刷新地块数据后重试");
   }
-  const executableZones = normalizeExecutionPlanZones(selectedPlan, fieldExecutionContext.deviceMarkers);
+  const executableZones = normalizeExecutionPlanZones(
+    selectedPlan,
+    fieldExecutionContext.zones,
+    fieldExecutionContext.deviceMarkers,
+  );
   if (executableZones.length === 0) {
     throw new Error("当前计划没有可执行分区，请先检查设备绑定和站点配置");
   }
@@ -818,6 +824,7 @@ export async function requestManualPlanExecution(input: {
     requestedAt,
     areaMu: fieldExecutionContext.areaMu,
     irrigationEfficiency: fieldExecutionContext.irrigationEfficiency,
+    zones: fieldExecutionContext.zones,
     deviceMarkers: fieldExecutionContext.deviceMarkers,
   });
   registerZoneAdvanceCleanupTimers(resolved, zoneAdvanceEvents);
@@ -1937,6 +1944,7 @@ async function submitRuleEngineMessage(
 
 type FieldExecutionContext = {
   rotationPlans: TbRotationPlanConfig[];
+  zones: NonNullable<TbFieldAssetConfig["zones"]>;
   deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>;
   areaMu: number;
   irrigationEfficiency: number;
@@ -1950,11 +1958,12 @@ async function loadFieldExecutionContext(
     session,
     { entityType: "ASSET", id: fieldId },
     "SERVER_SCOPE",
-    ["rotationPlans", "deviceMarkers", "areaMu", "irrigationEfficiency"],
+    ["rotationPlans", "zones", "deviceMarkers", "areaMu", "irrigationEfficiency"],
   );
 
   return {
     rotationPlans: normalizeRotationPlanConfigs(attributes.rotationPlans),
+    zones: normalizeZonesAttribute(attributes.zones) ?? [],
     deviceMarkers: normalizeDeviceMarkersAttribute(attributes.deviceMarkers) ?? [],
     areaMu: toNumber(attributes.areaMu) ?? 0,
     irrigationEfficiency: toNumber(attributes.irrigationEfficiency) ?? 0.85,
@@ -1970,10 +1979,11 @@ async function scheduleManualZoneAdvanceEvents(input: {
   requestedAt: number;
   areaMu: number;
   irrigationEfficiency: number;
+  zones: NonNullable<TbFieldAssetConfig["zones"]>;
   deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>;
 }) {
   const events = await fetchSchedulerEventRecords(input.session);
-  const zones = normalizeExecutionPlanZones(input.plan, input.deviceMarkers);
+  const zones = normalizeExecutionPlanZones(input.plan, input.zones, input.deviceMarkers);
   if (zones.length <= 1) {
     return [];
   }
@@ -2142,7 +2152,7 @@ async function cleanupInvalidPlanZoneAdvanceSchedulers(
         .filter((plan) => plan.enabled && plan.mode === "auto")
         .map((plan) => [
           plan.id,
-          normalizeExecutionPlanZones(plan, context?.deviceMarkers ?? []),
+          normalizeExecutionPlanZones(plan, context?.zones ?? [], context?.deviceMarkers ?? []),
         ]),
     );
 
@@ -2281,6 +2291,26 @@ function normalizeRotationPlanConfigs(value: unknown): TbRotationPlanConfig[] {
               zoneName: toStringValue(zone.zoneName ?? zone.name),
               siteNumber: toInt(zone.siteNumber) ?? 0,
               deviceId: toStringValue(zone.deviceId),
+              deviceIds: Array.isArray(zone.deviceIds)
+                ? zone.deviceIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+                : undefined,
+              deviceBindings: Array.isArray(zone.deviceBindings)
+                ? zone.deviceBindings
+                    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+                    .flatMap((entry) => {
+                      const deviceId = toStringValue(entry.deviceId);
+                      if (!deviceId) {
+                        return [];
+                      }
+                      return [
+                        {
+                          deviceId,
+                          siteNumber: toInt(entry.siteNumber) ?? undefined,
+                          deviceName: toStringValue(entry.deviceName),
+                        },
+                      ];
+                    })
+                : undefined,
               deviceName: toStringValue(zone.deviceName),
               order: toInt(zone.order) ?? undefined,
               durationMinutes: toNumber(zone.durationMinutes) ?? 0,
@@ -2293,15 +2323,51 @@ function normalizeRotationPlanConfigs(value: unknown): TbRotationPlanConfig[] {
 
 function normalizeExecutionPlanZones(
   plan: TbRotationPlanConfig,
+  zones: NonNullable<TbFieldAssetConfig["zones"]>,
   deviceMarkers: NonNullable<TbFieldAssetConfig["deviceMarkers"]>,
 ) {
   return plan.zones
-    .filter((zone) => zone.enabled !== false && !!zone.deviceId && Number(zone.siteNumber) > 0)
     .map((zone) => {
-      const marker = deviceMarkers.find((item) => item.deviceId === zone.deviceId);
+      const matchedZone = zone.zoneId ? zones.find((item) => item.id === zone.zoneId) : undefined;
+      const bindings =
+        matchedZone?.deviceBindings?.length
+          ? matchedZone.deviceBindings
+          : zone.deviceBindings?.length
+            ? zone.deviceBindings
+            : (zone.deviceIds ?? (zone.deviceId ? [zone.deviceId] : [])).map((deviceId) => ({
+                deviceId,
+                siteNumber: zone.siteNumber,
+                deviceName: zone.deviceName,
+              }));
+
+      const executionBindings = bindings
+        .filter((binding) => !!binding.deviceId)
+        .map((binding) => {
+          const marker = deviceMarkers.find((item) => item.deviceId === binding.deviceId);
+          return {
+            deviceId: binding.deviceId,
+            siteNumber: binding.siteNumber ?? zone.siteNumber,
+            deviceName: marker?.name || zone.deviceName || binding.deviceId,
+          };
+        });
+
       return {
         ...zone,
-        deviceName: zone.deviceName || marker?.name || "",
+        deviceId: executionBindings[0]?.deviceId ?? zone.deviceId,
+        deviceName: executionBindings[0]?.deviceName || zone.deviceName,
+        deviceBindings: executionBindings,
+        deviceIds: executionBindings.map((binding) => binding.deviceId),
+      };
+    })
+    .filter((zone) => zone.enabled !== false && zone.deviceBindings.length > 0 && Number(zone.siteNumber) > 0)
+    .map((zone) => {
+      return {
+        ...zone,
+        deviceName:
+          zone.deviceName ||
+          zone.deviceBindings[0]?.deviceName ||
+          zone.deviceBindings[0]?.deviceId ||
+          "",
       };
     })
     .filter((zone) => !!zone.deviceName)

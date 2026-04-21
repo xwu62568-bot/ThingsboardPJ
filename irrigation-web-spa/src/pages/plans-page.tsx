@@ -35,6 +35,12 @@ type ZonePlanFormState = {
   zoneName: string;
   siteNumber: string;
   deviceId: string;
+  deviceIds: string[];
+  deviceBindings: Array<{
+    deviceId: string;
+    siteNumber?: number;
+    deviceName?: string;
+  }>;
   order: string;
   durationMinutes: string;
   enabled: boolean;
@@ -127,7 +133,7 @@ export function PlansPage() {
         throw new Error("请至少选择一个参与轮灌的分区");
       }
       const realFieldId = await ensureThingsBoardField(session, field);
-      const nextPlan = buildPlanConfig(form, realFieldId, devices);
+      const nextPlan = buildPlanConfig(form, field, realFieldId, devices);
       const currentPlans = plans
         .filter((plan) => plan.fieldId === field.id || plan.fieldId === realFieldId)
         .filter((plan) => !form.id || plan.id !== form.id || plan.id.startsWith("plan-field-"))
@@ -295,7 +301,7 @@ export function PlansPage() {
                 .sort((left, right) => (left.order ?? left.siteNumber) - (right.order ?? right.siteNumber))
                 .map((zone, index) => (
                   <span key={`${zone.zoneId ?? zone.siteNumber}-${index}`}>
-                    {zone.zoneName ?? `${zone.siteNumber}区`} · {zone.durationMinutes} 分钟
+                    {zone.zoneName ?? `${zone.siteNumber}区`} · 总时长 {zone.durationMinutes} 分钟
                   </span>
                 ))}
             </div>
@@ -573,7 +579,7 @@ function PlanZoneRow({
         />
       </label>
       <label>
-        <span>时长（分钟）</span>
+        <span>分区总时长（分钟）</span>
         <input
           min="1"
           max="240"
@@ -695,22 +701,45 @@ function buildEmptyForm(field?: FieldSummary): PlanFormState {
 
 function buildPlanConfig(
   form: PlanFormState,
+  field: FieldSummary | undefined,
   fieldId: string,
   devices: DeviceSummary[],
 ): TbRotationPlanConfig {
   const zones = form.zones
     .filter((zone) => zone.enabled)
-    .map((zone, index) => ({
-      zoneId: zone.zoneId || undefined,
-      zoneName: zone.zoneName || undefined,
-      siteNumber: clampInt(Number(zone.siteNumber), 1, 999),
-      deviceId: zone.deviceId || undefined,
-      deviceName: devices.find((device) => device.id === zone.deviceId)?.name,
-      order: clampInt(Number(zone.order), 1, 64),
-      durationMinutes: clampInt(Number(zone.durationMinutes), 1, 240),
-      enabled: true,
-      fallbackOrder: index + 1,
-    }))
+    .map((zone, index) => {
+      const matchedZone = field?.mapZones?.find((item) => item.id === zone.zoneId);
+      const deviceBindings =
+        matchedZone?.deviceBindings?.length
+          ? matchedZone.deviceBindings.map((binding) => ({
+              deviceId: binding.deviceId,
+              siteNumber: binding.siteNumber,
+              deviceName: devices.find((device) => device.id === binding.deviceId)?.name,
+            }))
+          : zone.deviceId
+            ? [
+                {
+                  deviceId: zone.deviceId,
+                  siteNumber: clampInt(Number(zone.siteNumber), 1, 999),
+                  deviceName: devices.find((device) => device.id === zone.deviceId)?.name,
+                },
+              ]
+            : [];
+
+      return {
+        zoneId: zone.zoneId || undefined,
+        zoneName: zone.zoneName || undefined,
+        siteNumber: clampInt(Number(zone.siteNumber), 1, 999),
+        deviceId: deviceBindings[0]?.deviceId,
+        deviceIds: deviceBindings.map((binding) => binding.deviceId),
+        deviceBindings,
+        deviceName: deviceBindings[0]?.deviceName,
+        order: clampInt(Number(zone.order), 1, 64),
+        durationMinutes: clampInt(Number(zone.durationMinutes), 1, 240),
+        enabled: true,
+        fallbackOrder: index + 1,
+      };
+    })
     .sort((left, right) => left.order - right.order || left.fallbackOrder - right.fallbackOrder)
     .map(({ fallbackOrder, ...zone }) => zone);
   return {
@@ -764,6 +793,8 @@ function mapSummaryToConfig(
       zoneName: zone.zoneName,
       siteNumber: zone.siteNumber,
       deviceId: zone.deviceId,
+      deviceIds: zone.deviceIds,
+      deviceBindings: zone.deviceBindings,
       deviceName: zone.deviceName,
       order: zone.order ?? index + 1,
       durationMinutes: zone.durationMinutes,
@@ -787,11 +818,22 @@ function buildZoneFormRows(
     const deviceId = binding?.deviceId ?? zone.deviceId ?? zone.deviceIds?.[0] ?? "";
     const siteNumber = binding?.siteNumber ?? zone.valveSiteNumber ?? zone.siteNumber ?? index + 1;
     const saved = planZones.get(zone.id) ?? planZones.get(String(siteNumber));
+    const savedBindings =
+      saved?.deviceBindings?.length
+        ? saved.deviceBindings
+        : zone.deviceBindings?.length
+          ? zone.deviceBindings
+          : (zone.deviceIds ?? (zone.deviceId ? [zone.deviceId] : [])).map((deviceId) => ({
+              deviceId,
+              siteNumber,
+            }));
     return {
       zoneId: zone.id,
       zoneName: zone.name || `${index + 1}区`,
       siteNumber: String(saved?.siteNumber ?? siteNumber),
       deviceId: saved?.deviceId ?? deviceId,
+      deviceIds: saved?.deviceIds ?? savedBindings.map((item) => item.deviceId),
+      deviceBindings: savedBindings,
       order: String(saved?.order ?? index + 1),
       durationMinutes: String(saved?.durationMinutes ?? 10),
       enabled: saved?.enabled ?? true,
@@ -805,6 +847,18 @@ function buildZoneFormRows(
     zoneName: zone.zoneName ?? `${zone.siteNumber || index + 1}区`,
     siteNumber: String(zone.siteNumber || index + 1),
     deviceId: zone.deviceId ?? "",
+    deviceIds: zone.deviceIds ?? (zone.deviceId ? [zone.deviceId] : []),
+    deviceBindings:
+      zone.deviceBindings ??
+      (zone.deviceId
+        ? [
+            {
+              deviceId: zone.deviceId,
+              siteNumber: zone.siteNumber,
+              deviceName: zone.deviceName,
+            },
+          ]
+        : []),
     order: String(zone.order ?? index + 1),
     durationMinutes: String(zone.durationMinutes || 10),
     enabled: zone.enabled ?? true,
@@ -920,11 +974,22 @@ function toggleWeekday(
 }
 
 function formatZoneDevice(zone: ZonePlanFormState, devices: DeviceSummary[]) {
-  if (!zone.deviceId) {
+  const bindings =
+    zone.deviceBindings.length > 0
+      ? zone.deviceBindings
+      : zone.deviceId
+        ? [{ deviceId: zone.deviceId, siteNumber: Number(zone.siteNumber) || undefined }]
+        : [];
+  if (bindings.length === 0) {
     return "未绑定设备";
   }
-  const device = devices.find((item) => item.id === zone.deviceId);
-  return `${device?.name ?? zone.deviceId.slice(0, 8)} · ${zone.siteNumber} 号站点`;
+  return bindings
+    .map((binding) => {
+      const device = devices.find((item) => item.id === binding.deviceId);
+      const label = binding.deviceName || device?.name || binding.deviceId.slice(0, 8);
+      return `${label} · ${binding.siteNumber ?? zone.siteNumber} 号站点`;
+    })
+    .join(" / ");
 }
 
 function formatSchedule(plan: IrrigationPlanSummary) {
