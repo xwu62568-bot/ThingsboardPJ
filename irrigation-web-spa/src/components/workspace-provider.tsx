@@ -5,7 +5,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -49,7 +48,6 @@ type WorkspaceContextValue = {
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
-const MENU_REFRESH_THROTTLE_MS = 15_000;
 
 export function WorkspaceProvider({ children }: PropsWithChildren) {
   const navigate = useNavigate();
@@ -62,7 +60,6 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
   const [deviceDetailsById, setDeviceDetailsById] = useState<Record<string, DeviceState>>({});
   const [loading, setLoading] = useState(() => cachedDevices.length === 0 && cachedFields.length === 0);
   const [error, setError] = useState("");
-  const lastMenuRefreshAtRef = useRef(0);
 
   const mergeFieldRecords = (nextRecords: TbFieldAssetRecord[]) => {
     setFieldRecords((current) => {
@@ -134,13 +131,10 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
     let disposed = false;
 
     const refreshOnMenuSwitch = async () => {
-      if (Date.now() - lastMenuRefreshAtRef.current < MENU_REFRESH_THROTTLE_MS) {
-        return;
-      }
       try {
         const [full, fieldsFromTb] = await Promise.all([
           fetchDeviceList(session),
-          fetchFieldAssetRecords(session).catch(() => []),
+          fetchFieldAssetRecords(session, { force: true }).catch(() => []),
         ]);
         if (disposed) {
           return;
@@ -152,7 +146,6 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         setDevices(full);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
-        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       } catch (refreshError) {
         if (!disposed) {
@@ -193,7 +186,6 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
-        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       },
       refreshWorkspace: async () => {
@@ -205,7 +197,6 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         setDevices(full);
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
-        lastMenuRefreshAtRef.current = Date.now();
         setError("");
       },
     };
