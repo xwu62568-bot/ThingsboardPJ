@@ -21,7 +21,6 @@ type StrategyFormState = {
   moistureMin: string;
   moistureRecover: string;
   etcTriggerMm: string;
-  targetWaterMm: string;
   targetWaterM3PerMu: string;
   flowRateM3h: string;
   irrigationEfficiency: string;
@@ -37,7 +36,7 @@ type StrategyFormState = {
 
 const STRATEGY_TYPES: Array<{ type: StrategyType; title: string; desc: string }> = [
   { type: "threshold", title: "阈值灌溉", desc: "根据土壤湿度下限和恢复阈值触发灌溉。" },
-  { type: "etc", title: "ETc 灌溉", desc: "按 ET0、作物系数、有效降雨和缺水阈值决策。" },
+  { type: "etc", title: "ETc 灌溉", desc: "按 ET0、作物系数、有效降雨和 ET 缺水量触发阈值决策。" },
 ];
 
 export function StrategiesPage() {
@@ -219,6 +218,7 @@ export function StrategiesPage() {
                 </button>
               ))}
             </div>
+            <StrategyTypeGuide type={form.type} />
 
             <label>
               <span>策略名称</span>
@@ -469,35 +469,27 @@ function ExecutionFields({
   form: StrategyFormState;
   setForm: Dispatch<SetStateAction<StrategyFormState>>;
 }) {
-  const executionOptions =
-    form.type === "etc"
-      ? [
-          { value: "etc", label: "按 ETc 缺水量" },
-          { value: "quota", label: "定量灌溉" },
-          { value: "duration", label: "按时长" },
-        ]
-      : [
-          { value: "duration", label: "按时长" },
-          { value: "quota", label: "定量灌溉" },
-        ];
-
   return (
     <>
-      <label>
-        <span>执行方式</span>
-        <select
-          value={form.executionMode}
-          onChange={(event) =>
-            setFormValue(setForm, "executionMode", event.target.value as StrategyFormState["executionMode"])
-          }
-        >
-          {executionOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {form.type === "etc" ? (
+        <label>
+          <span>执行方式</span>
+          <input value="按 ETc 缺水量" readOnly />
+        </label>
+      ) : (
+        <label>
+          <span>执行方式</span>
+          <select
+            value={form.executionMode}
+            onChange={(event) =>
+              setFormValue(setForm, "executionMode", event.target.value as StrategyFormState["executionMode"])
+            }
+          >
+            <option value="duration">按时长</option>
+            <option value="quota">定量灌溉</option>
+          </select>
+        </label>
+      )}
       {form.executionMode === "quota" ? (
         <>
       <label>
@@ -509,17 +501,6 @@ function ExecutionFields({
           type="number"
           value={form.targetWaterM3PerMu}
           onChange={(event) => setFormValue(setForm, "targetWaterM3PerMu", event.target.value)}
-        />
-      </label>
-      <label>
-        <span>分区流量（m³/h）</span>
-        <input
-          min="0.1"
-          max="200"
-          step="0.1"
-          type="number"
-          value={form.flowRateM3h}
-          onChange={(event) => setFormValue(setForm, "flowRateM3h", event.target.value)}
         />
       </label>
       <label>
@@ -572,7 +553,7 @@ function EtcFields({
   return (
     <>
       <label>
-        <span>缺水触发阈值（mm）</span>
+        <span>ET 缺水量触发阈值（mm）</span>
         <input
           min="0.1"
           max="80"
@@ -604,18 +585,54 @@ function EtcFields({
           onChange={(event) => setFormValue(setForm, "effectiveRainfallRatio", event.target.value)}
         />
       </label>
-      <label>
-        <span>目标补水深度（mm）</span>
-        <input
-          min="0.1"
-          max="80"
-          step="0.1"
-          type="number"
-          value={form.targetWaterMm}
-          onChange={(event) => setFormValue(setForm, "targetWaterMm", event.target.value)}
-        />
-      </label>
     </>
+  );
+}
+
+function StrategyTypeGuide({ type }: { type: StrategyType }) {
+  const lines =
+    type === "etc"
+      ? [
+          "ET 缺水量触发阈值：达到这个缺水量后，策略才会启动灌溉。",
+          "有效降雨折算：把预报降雨按比例折算成可抵扣的雨量，避免雨前雨后重复灌溉。",
+          "单次补水比例：决定这次补回多少缺水量，用来控制灌溉强度。",
+        ]
+      : [
+          "土壤湿度下限：低于这个值时，策略会判定需要补水。",
+          "恢复阈值：达到这个值后，表示湿度恢复到目标区间。",
+          "按时长或定量：决定本轮按固定时长执行，还是按目标水量执行。",
+          "最短触发间隔和雨天锁定：用来避免过于频繁灌溉，并在降雨条件下跳过执行。",
+        ];
+  const asideTitle = type === "etc" ? "时长如何计算" : "触发后如何执行";
+  const asideLines =
+    type === "etc"
+      ? [
+          "触发后，系统不会直接使用固定时长，而是会先计算本轮需要补多少水。",
+          "随后结合地块面积、分区数量、系统带入的流量值和灌溉效率，自动换算出每个分区的灌溉时长。",
+          "如果计算结果超过“单次最长时长”，则按最长时长执行。",
+        ]
+      : [
+          "当湿度低于下限后，系统会按当前选择的执行方式启动灌溉。",
+          "按时长时，分区会按固定时长执行；按定量时，会按目标水量和流量值换算本轮灌溉时长。",
+          "无论哪种方式，都会受到最短触发间隔、雨天锁定和单次最长时长的约束。",
+        ];
+
+  return (
+    <div className="strategyTypeGuide strategyTypeGuide--split">
+      <strong>{type === "etc" ? "ETc 灌溉说明" : "阈值灌溉说明"}</strong>
+      <div className="strategyTypeGuideBody">
+        <strong>参数如何理解</strong>
+        {lines.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
+      <div className="strategyTypeGuideAside">
+        <strong>{asideTitle}</strong>
+        {asideLines.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -630,7 +647,6 @@ function buildEmptyForm(field?: FieldSummary): StrategyFormState {
     moistureMin: "28",
     moistureRecover: "36",
     etcTriggerMm: "5",
-    targetWaterMm: "8",
     targetWaterM3PerMu: "5",
     flowRateM3h: "2",
     irrigationEfficiency: "0.85",
@@ -657,13 +673,12 @@ function mapStrategyToForm(strategy: StrategySummary): StrategyFormState {
     moistureMin: String(strategy.moistureMin),
     moistureRecover: String(strategy.moistureRecover),
     etcTriggerMm: String(strategy.etcTriggerMm),
-    targetWaterMm: String(strategy.targetWaterMm),
     targetWaterM3PerMu: String(strategy.targetWaterM3PerMu),
     flowRateM3h: String(strategy.flowRateM3h),
     irrigationEfficiency: String(strategy.irrigationEfficiency),
     effectiveRainfallRatio: String(strategy.effectiveRainfallRatio),
     replenishRatio: String(strategy.replenishRatio),
-    executionMode: strategy.executionMode,
+    executionMode: strategy.type === "etc" ? "etc" : strategy.executionMode,
     minIntervalHours: String(strategy.minIntervalHours),
     maxDurationMinutes: String(strategy.maxDurationMinutes),
     splitRounds: strategy.splitRounds,
@@ -676,6 +691,7 @@ function buildStrategyConfig(
   form: StrategyFormState,
   fieldId: string,
 ): TbAutomationStrategyConfig {
+  const executionMode = form.type === "etc" ? "etc" : form.executionMode;
   return {
     id:
       form.id && !form.id.startsWith("strategy-field-")
@@ -690,13 +706,12 @@ function buildStrategyConfig(
     moistureMin: clampNumber(Number(form.moistureMin), 0, 100),
     moistureRecover: clampNumber(Number(form.moistureRecover), 0, 100),
     etcTriggerMm: clampNumber(Number(form.etcTriggerMm), 0, 80),
-    targetWaterMm: clampNumber(Number(form.targetWaterMm), 0.1, 80),
     targetWaterM3PerMu: clampNumber(Number(form.targetWaterM3PerMu), 0.1, 100),
     flowRateM3h: clampNumber(Number(form.flowRateM3h), 0.1, 200),
     irrigationEfficiency: clampNumber(Number(form.irrigationEfficiency), 0.1, 1),
     effectiveRainfallRatio: clampNumber(Number(form.effectiveRainfallRatio), 0, 1),
     replenishRatio: clampNumber(Number(form.replenishRatio), 0.1, 1),
-    executionMode: form.executionMode,
+    executionMode,
     minIntervalHours: clampNumber(Number(form.minIntervalHours), 1, 168),
     maxDurationMinutes: clampNumber(Number(form.maxDurationMinutes), 1, 360),
     splitRounds: form.splitRounds,
@@ -709,6 +724,7 @@ function mapSummaryToConfig(
   strategy: StrategySummary,
   fieldId: string,
 ): TbAutomationStrategyConfig {
+  const executionMode = strategy.type === "etc" ? "etc" : strategy.executionMode;
   return {
     id: strategy.id,
     name: strategy.name,
@@ -720,13 +736,12 @@ function mapSummaryToConfig(
     moistureMin: strategy.moistureMin,
     moistureRecover: strategy.moistureRecover,
     etcTriggerMm: strategy.etcTriggerMm,
-    targetWaterMm: strategy.targetWaterMm,
     targetWaterM3PerMu: strategy.targetWaterM3PerMu,
     flowRateM3h: strategy.flowRateM3h,
     irrigationEfficiency: strategy.irrigationEfficiency,
     effectiveRainfallRatio: strategy.effectiveRainfallRatio,
     replenishRatio: strategy.replenishRatio,
-    executionMode: strategy.executionMode,
+    executionMode,
     minIntervalHours: strategy.minIntervalHours,
     maxDurationMinutes: strategy.maxDurationMinutes,
     splitRounds: strategy.splitRounds,
@@ -827,7 +842,7 @@ function toggleZone(
 function buildStrategyMetrics(strategy: StrategySummary) {
   if (strategy.type === "etc") {
     return [
-      { label: "缺水阈值", value: `${strategy.etcTriggerMm.toFixed(1)} mm` },
+      { label: "ET 缺水量触发阈值", value: `${strategy.etcTriggerMm.toFixed(1)} mm` },
       { label: "补水比例", value: `${Math.round(strategy.replenishRatio * 100)}%` },
       { label: "执行方式", value: formatExecutionMode(strategy.executionMode) },
       { label: "雨天锁定", value: strategy.rainLockEnabled ? "开启" : "关闭" },
@@ -843,7 +858,7 @@ function buildStrategyMetrics(strategy: StrategySummary) {
 
 function formatStrategyPrimaryValue(strategy: StrategySummary) {
   if (strategy.type === "etc") {
-    return `累计缺水 >= ${strategy.etcTriggerMm.toFixed(1)} mm`;
+    return `ET 缺水量 >= ${strategy.etcTriggerMm.toFixed(1)} mm`;
   }
   return `湿度 < ${strategy.moistureMin}%`;
 }
