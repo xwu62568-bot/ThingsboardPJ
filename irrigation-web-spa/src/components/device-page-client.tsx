@@ -10,9 +10,11 @@ import {
 } from "@/lib/client/thingsboard";
 import type { DeviceState, DeviceSummary } from "@/lib/domain/types";
 
+const DEFAULT_MANUAL_DURATION_SECONDS = 60;
+
 export function DevicePageClient() {
   const params = useParams<{ deviceId: string }>();
-  const { session, devices } = useWorkspace();
+  const { session, devices, updateDeviceFromDetail } = useWorkspace();
   const deviceId = String(params.deviceId);
   const [device, setDevice] = useState<DeviceState | null>(() =>
     getCachedDeviceDetail(session, deviceId),
@@ -24,6 +26,7 @@ export function DevicePageClient() {
     void fetchDeviceDetail(session, deviceId)
       .then((currentDevice) => {
         setDevice(currentDevice);
+        updateDeviceFromDetail(currentDevice);
         setError("");
         setReady(true);
       })
@@ -31,7 +34,7 @@ export function DevicePageClient() {
         setError(loadError instanceof Error ? loadError.message : "设备加载失败");
         setReady(true);
       });
-  }, [deviceId, session]);
+  }, [deviceId, session, updateDeviceFromDetail]);
 
   if (!ready) {
     return <main className="workspacePage">加载中...</main>;
@@ -67,6 +70,7 @@ export function DevicePageClient() {
         initialDevice={device}
         devices={devices}
         activeDeviceId={deviceId}
+        onDeviceChange={updateDeviceFromDetail}
       />
     </main>
   );
@@ -91,10 +95,11 @@ function reconcileDeviceSiteCount(
         current ?? {
           siteNumber,
           label: `站点${siteNumber}`,
+          valveState: "unknown",
           open: false,
           remainingSeconds: 0,
           openingDurationSeconds: 0,
-          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? 600,
+          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? DEFAULT_MANUAL_DURATION_SECONDS,
         }
       );
     }),

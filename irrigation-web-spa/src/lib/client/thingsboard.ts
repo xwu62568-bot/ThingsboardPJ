@@ -1,9 +1,12 @@
 import type {
   ConnectivityState,
+  DeviceControlMode,
   DeviceState,
   DeviceSummary,
   GatewayState,
   IrrigationUser,
+  PlatformState,
+  ValveRpcConfig,
 } from "@/lib/domain/types";
 import { clearStoredSession, getStoredSession, type TbSession } from "./session";
 
@@ -11,9 +14,12 @@ export const DEFAULT_TB_BASE_URL =
   import.meta.env.VITE_TB_BASE_URL?.trim() || "http://58.210.46.6:8888";
 
 const CONTROL_REFRESH_DELAYS_MS = [1200, 2600];
+const DEVICE_DETAIL_DEFAULT_MANUAL_DURATION_SECONDS = 60;
 const DEVICE_LIST_ENRICH_CONCURRENCY = 4;
-const DEVICE_LIST_CACHE_TTL_MS = 15_000;
-const FIELD_ASSET_CACHE_TTL_MS = 15_000;
+const DEVICE_LIST_CACHE_TTL_MS = 60_000;
+const DEVICE_DETAIL_CACHE_TTL_MS = 30_000;
+const FIELD_ASSET_CACHE_TTL_MS = 60_000;
+const CURRENT_USER_CACHE_TTL_MS = 60_000;
 
 const TELEMETRY_KEYS = [
   "selectedSiteNumber",
@@ -31,6 +37,7 @@ const TELEMETRY_KEYS = [
   "gatewayOnline",
   "gatewayOfflineTs",
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}Open`),
+  ...Array.from({ length: 8 }, (_, index) => `v${index + 1}_state`),
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}RemainingSeconds`),
   ...Array.from({ length: 8 }, (_, index) => `station${index + 1}OpeningDurationSeconds`),
 ];
@@ -56,6 +63,19 @@ const CLIENT_ATTRIBUTE_KEYS = [
   "lastRpcValveSiteNumber",
   "lastRpcManualDurationSeconds",
   "lastControlAppliedAt",
+  "controlMode",
+  "deviceType",
+  "productType",
+  "hideConnectivityState",
+  "supportsConnectionControl",
+  "valveRpcMethod",
+  "openValveRpcMethod",
+  "closeValveRpcMethod",
+  "valveField",
+  "durationField",
+  "commandIdField",
+  "openCommandId",
+  "closeCommandId",
 ];
 
 const SHARED_ATTRIBUTE_KEYS = [
@@ -67,6 +87,19 @@ const SHARED_ATTRIBUTE_KEYS = [
   "displayName",
   "blePeripheralId",
   "targetDeviceName",
+  "controlMode",
+  "deviceType",
+  "productType",
+  "hideConnectivityState",
+  "supportsConnectionControl",
+  "valveRpcMethod",
+  "openValveRpcMethod",
+  "closeValveRpcMethod",
+  "valveField",
+  "durationField",
+  "commandIdField",
+  "openCommandId",
+  "closeCommandId",
 ];
 
 const FIELD_ASSET_TYPE = "Field";
@@ -142,9 +175,17 @@ const unsupportedCustomerDeviceInfosKeys = new Set<string>();
 const deviceListCache = new Map<string, DeviceSummary[]>();
 const deviceListCacheMode = new Map<string, "basic" | "full">();
 const deviceListCacheFetchedAt = new Map<string, number>();
+const deviceListInflight = new Map<string, Promise<DeviceSummary[]>>();
 const deviceDetailCache = new Map<string, DeviceState>();
+const deviceDetailCacheFetchedAt = new Map<string, number>();
+const deviceDetailInflight = new Map<string, Promise<DeviceState>>();
 const fieldAssetCache = new Map<string, TbFieldAssetRecord[]>();
 const fieldAssetCacheFetchedAt = new Map<string, number>();
+const fieldAssetInflight = new Map<string, Promise<TbFieldAssetRecord[]>>();
+const currentUserCache = new Map<string, { value: unknown; fetchedAt: number }>();
+const currentUserInflight = new Map<string, Promise<unknown>>();
+const tbRateLimitedUntil = new Map<string, number>();
+const recentDirectRpcCommands = new Map<string, number>();
 const fieldSchedulerCleanupTimestamps = new Map<string, number>();
 const zoneAdvanceCleanupTimers = new Map<string, number>();
 const debugListeners = new Set<(entry: TbDebugEntry) => void>();
@@ -162,6 +203,17 @@ type DeviceMapping = {
   model?: string;
   serialNumber?: string;
   siteCount?: number;
+  controlMode?: DeviceControlMode;
+  hideConnectivityState?: boolean;
+  supportsConnectionControl?: boolean;
+  valveRpcMethod?: string;
+  openValveRpcMethod?: string;
+  closeValveRpcMethod?: string;
+  valveField?: string;
+  durationField?: string;
+  commandIdField?: string;
+  openCommandId?: number;
+  closeCommandId?: number;
 };
 
 export type TbEntityType = "ASSET" | "DEVICE";
@@ -339,6 +391,9 @@ function emitDebugLog(entry: Omit<TbDebugEntry, "id" | "at">) {
   for (const listener of debugListeners) {
     listener(record);
   }
+  if (entry.scope === "rest") {
+    return;
+  }
   const logger = entry.level === "error" ? console.error : console.info;
   logger(`[tb:${entry.scope}] ${entry.message}`, entry.detail ?? "");
 }
@@ -466,10 +521,14 @@ export async function logoutFromThingsBoard(): Promise<void> {
 
 export async function fetchDeviceList(
   session?: TbSession | null,
-  options?: { force?: boolean },
+  options?: { force?: boolean; enrich?: boolean },
 ): Promise<DeviceSummary[]> {
   const resolved = resolveRequiredSession(session);
+  if (options?.enrich === false) {
+    return fetchDeviceListBasic(resolved);
+  }
   const cacheKey = getDeviceListCacheKey(resolved);
+  const inflightKey = `${cacheKey}::full`;
   const cached = deviceListCache.get(cacheKey);
   const fetchedAt = deviceListCacheFetchedAt.get(cacheKey) ?? 0;
   if (
@@ -481,29 +540,63 @@ export async function fetchDeviceList(
   ) {
     return cached;
   }
-  const rows = await fetchAccessibleDeviceRows(resolved);
-  const devices = await mapWithConcurrency(rows, DEVICE_LIST_ENRICH_CONCURRENCY, (raw) =>
-    mapToDeviceSummary(resolved, raw),
-  );
-  deviceListCache.set(cacheKey, devices);
-  deviceListCacheMode.set(cacheKey, "full");
-  deviceListCacheFetchedAt.set(cacheKey, Date.now());
-  return devices;
+  const inflight = deviceListInflight.get(inflightKey);
+  if (inflight) {
+    return inflight;
+  }
+  const request = (async () => {
+    const rows = await fetchAccessibleDeviceRows(resolved);
+    const devices = await mapWithConcurrency(rows, DEVICE_LIST_ENRICH_CONCURRENCY, (raw) =>
+      mapToDeviceSummary(resolved, raw),
+    );
+    deviceListCache.set(cacheKey, devices);
+    deviceListCacheMode.set(cacheKey, "full");
+    deviceListCacheFetchedAt.set(cacheKey, Date.now());
+    return devices;
+  })();
+  deviceListInflight.set(inflightKey, request);
+  try {
+    return await request;
+  } finally {
+    deviceListInflight.delete(inflightKey);
+  }
 }
 
 export async function fetchDeviceListBasic(session?: TbSession | null): Promise<DeviceSummary[]> {
   const resolved = resolveRequiredSession(session);
-  const rows = await fetchAccessibleDeviceRows(resolved);
-  const devices = rows.map((raw) => {
-    const item = (raw ?? {}) as Record<string, unknown>;
-    const itemId = item.id as { id?: string } | undefined;
-    return buildBaseDeviceSummary(item, itemId?.id ?? "");
-  });
   const cacheKey = getDeviceListCacheKey(resolved);
-  deviceListCache.set(cacheKey, devices);
-  deviceListCacheMode.set(cacheKey, "basic");
-  deviceListCacheFetchedAt.set(cacheKey, Date.now());
-  return devices;
+  const inflightKey = `${cacheKey}::basic`;
+  const cached = deviceListCache.get(cacheKey);
+  const fetchedAt = deviceListCacheFetchedAt.get(cacheKey) ?? 0;
+  if (
+    cached &&
+    cached.length > 0 &&
+    Date.now() - fetchedAt < DEVICE_LIST_CACHE_TTL_MS
+  ) {
+    return cached;
+  }
+  const inflight = deviceListInflight.get(inflightKey);
+  if (inflight) {
+    return inflight;
+  }
+  const request = (async () => {
+    const rows = await fetchAccessibleDeviceRows(resolved);
+    const devices = rows.map((raw) => {
+      const item = (raw ?? {}) as Record<string, unknown>;
+      const itemId = item.id as { id?: string } | undefined;
+      return buildBaseDeviceSummary(item, itemId?.id ?? "");
+    });
+    deviceListCache.set(cacheKey, devices);
+    deviceListCacheMode.set(cacheKey, "basic");
+    deviceListCacheFetchedAt.set(cacheKey, Date.now());
+    return devices;
+  })();
+  deviceListInflight.set(inflightKey, request);
+  try {
+    return await request;
+  } finally {
+    deviceListInflight.delete(inflightKey);
+  }
 }
 
 export function getCachedDeviceList(session?: TbSession | null): DeviceSummary[] {
@@ -542,44 +635,58 @@ export async function fetchFieldAssetRecords(
     }
     return cached;
   }
-  void cleanupStaleZoneAdvanceSchedulers(resolved).catch((error) => {
-    emitDebugLog({
-      level: "error",
-      scope: "rest",
-      message: "清理过期分区推进调度失败",
-      detail: error instanceof Error ? error.message : String(error),
+  const inflight = fieldAssetInflight.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+  if (options?.force) {
+    void cleanupStaleZoneAdvanceSchedulers(resolved).catch((error) => {
+      emitDebugLog({
+        level: "error",
+        scope: "rest",
+        message: "清理过期分区推进调度失败",
+        detail: error instanceof Error ? error.message : String(error),
+      });
     });
-  });
-  void cleanupInvalidPlanZoneAdvanceSchedulers(resolved).catch((error) => {
-    emitDebugLog({
-      level: "error",
-      scope: "rest",
-      message: "清理自动轮灌推进调度失败",
-      detail: error instanceof Error ? error.message : String(error),
+    void cleanupInvalidPlanZoneAdvanceSchedulers(resolved).catch((error) => {
+      emitDebugLog({
+        level: "error",
+        scope: "rest",
+        message: "清理自动轮灌推进调度失败",
+        detail: error instanceof Error ? error.message : String(error),
+      });
     });
-  });
-  const rows = await fetchAccessibleAssetRows(resolved, FIELD_ASSET_TYPE);
-  const records = await mapWithConcurrency(rows, 4, async (raw) => {
-    const item = (raw ?? {}) as Record<string, unknown>;
-    const assetId = extractEntityId(item.id);
-    const [attributes, telemetry] = assetId
-      ? await Promise.all([
-          getEntityAttributes(resolved, { entityType: "ASSET", id: assetId }, "SERVER_SCOPE", FIELD_ATTRIBUTE_KEYS),
-          getEntityLatestTelemetry(resolved, { entityType: "ASSET", id: assetId }, FIELD_TELEMETRY_KEYS),
-        ])
-      : [{}, {}];
+  }
+  const request = (async () => {
+    const rows = await fetchAccessibleAssetRows(resolved, FIELD_ASSET_TYPE);
+    const records = await mapWithConcurrency(rows, 4, async (raw) => {
+      const item = (raw ?? {}) as Record<string, unknown>;
+      const assetId = extractEntityId(item.id);
+      const [attributes, telemetry] = assetId
+        ? await Promise.all([
+            getEntityAttributes(resolved, { entityType: "ASSET", id: assetId }, "SERVER_SCOPE", FIELD_ATTRIBUTE_KEYS),
+            getEntityLatestTelemetry(resolved, { entityType: "ASSET", id: assetId }, FIELD_TELEMETRY_KEYS),
+          ])
+        : [{}, {}];
 
-    return {
-      id: assetId ?? "",
-      name: typeof item.name === "string" ? item.name : "未命名地块",
-      label: typeof item.label === "string" ? item.label : undefined,
-      type: typeof item.type === "string" ? item.type : FIELD_ASSET_TYPE,
-      config: mapFieldAssetConfig(attributes),
-      telemetry,
-    };
-  });
-  setCachedFieldAssetRecords(resolved, records);
-  return records;
+      return {
+        id: assetId ?? "",
+        name: typeof item.name === "string" ? item.name : "未命名地块",
+        label: typeof item.label === "string" ? item.label : undefined,
+        type: typeof item.type === "string" ? item.type : FIELD_ASSET_TYPE,
+        config: mapFieldAssetConfig(attributes),
+        telemetry,
+      };
+    });
+    setCachedFieldAssetRecords(resolved, records);
+    return records;
+  })();
+  fieldAssetInflight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    fieldAssetInflight.delete(cacheKey);
+  }
 }
 
 export function getCachedFieldAssetRecords(session?: TbSession | null): TbFieldAssetRecord[] {
@@ -985,6 +1092,23 @@ function buildBaseDeviceSummary(
     typeof item.type === "string" ? item.type : undefined,
     typeof item.label === "string" ? item.label : undefined,
   );
+  const controlProfile = resolveDeviceControlProfile({
+    mapping,
+    info: item,
+    clientAttributes: {},
+    sharedAttributes: {},
+    fallbackModel:
+      mapping?.model ||
+      (typeof item.type === "string" ? item.type : undefined) ||
+      (typeof item.label === "string" ? item.label : undefined),
+  });
+  const platformState = resolvePlatformState(item);
+  const connectivityState = normalizeRuntimeConnectivityState({
+    controlMode: controlProfile.controlMode,
+    isGateway: false,
+    platformState,
+    bleConnectivityState: "disconnected",
+  });
   return {
     id: deviceId,
     name: displayName,
@@ -1001,9 +1125,12 @@ function buildBaseDeviceSummary(
       (typeof item.targetDeviceName === "string" && item.targetDeviceName.trim()) ||
       (typeof item.name === "string" && item.name.trim()) ||
       "",
-    platformState: resolvePlatformState(item),
+    controlMode: controlProfile.controlMode,
+    supportsConnectionControl: controlProfile.supportsConnectionControl,
+    hideConnectivityState: controlProfile.hideConnectivityState,
+    platformState,
     platformLastActivityAt: resolvePlatformLastActivityAt(item),
-    connectivityState: "disconnected" as ConnectivityState,
+    connectivityState,
     lastSeenAt: toInt(item.lastActivityTime) ?? 0,
     selectedSiteNumber: 1,
     siteCount: mapping?.siteCount ?? inferredSiteCount,
@@ -1014,6 +1141,131 @@ function buildBaseDeviceSummary(
     bleConnectivityState: "disconnected" as ConnectivityState,
     statusChangedAt: 0,
   } satisfies DeviceSummary;
+}
+
+function resolveDeviceControlProfile(input: {
+  mapping?: DeviceMapping | null;
+  info?: Record<string, unknown>;
+  clientAttributes: Record<string, unknown>;
+  sharedAttributes: Record<string, unknown>;
+  fallbackModel?: string;
+}): {
+  controlMode: DeviceControlMode;
+  supportsConnectionControl: boolean;
+  hideConnectivityState: boolean;
+  valveRpc: ValveRpcConfig;
+} {
+  const explicitMode = normalizeDeviceControlMode(
+    input.mapping?.controlMode ??
+      toStringValue(input.sharedAttributes.controlMode) ??
+      toStringValue(input.clientAttributes.controlMode) ??
+      toStringValue(input.sharedAttributes.deviceType) ??
+      toStringValue(input.clientAttributes.deviceType) ??
+      toStringValue(input.sharedAttributes.productType) ??
+      toStringValue(input.clientAttributes.productType),
+  );
+  const modelIdentity = [
+    input.mapping?.model,
+    input.fallbackModel,
+    typeof input.info?.type === "string" ? input.info.type : undefined,
+    typeof input.info?.label === "string" ? input.info.label : undefined,
+    typeof input.info?.name === "string" ? input.info.name : undefined,
+    toStringValue(input.sharedAttributes.displayName),
+    toStringValue(input.clientAttributes.displayName),
+    toStringValue(input.sharedAttributes.targetDeviceName),
+    toStringValue(input.clientAttributes.targetDeviceName),
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toUpperCase();
+  const inferredMode =
+    explicitMode ??
+    (looksLikeDirect4gController(modelIdentity) ? "direct_4g" : "ble_gateway");
+  const hideConnectivityState =
+    toBoolean(input.sharedAttributes.hideConnectivityState) ??
+    toBoolean(input.clientAttributes.hideConnectivityState) ??
+    input.mapping?.hideConnectivityState ??
+    (inferredMode === "direct_4g");
+  const supportsConnectionControl =
+    toBoolean(input.sharedAttributes.supportsConnectionControl) ??
+    toBoolean(input.clientAttributes.supportsConnectionControl) ??
+    input.mapping?.supportsConnectionControl ??
+    (inferredMode === "ble_gateway");
+
+  return {
+    controlMode: inferredMode,
+    supportsConnectionControl,
+    hideConnectivityState,
+    valveRpc: {
+      rpcMethod:
+        input.mapping?.valveRpcMethod ??
+        toStringValue(input.sharedAttributes.valveRpcMethod) ??
+        toStringValue(input.clientAttributes.valveRpcMethod),
+      openRpcMethod:
+        input.mapping?.openValveRpcMethod ??
+        toStringValue(input.sharedAttributes.openValveRpcMethod) ??
+        toStringValue(input.clientAttributes.openValveRpcMethod),
+      closeRpcMethod:
+        input.mapping?.closeValveRpcMethod ??
+        toStringValue(input.sharedAttributes.closeValveRpcMethod) ??
+        toStringValue(input.clientAttributes.closeValveRpcMethod),
+      valveField:
+        input.mapping?.valveField ??
+        toStringValue(input.sharedAttributes.valveField) ??
+        toStringValue(input.clientAttributes.valveField) ??
+        "valve",
+      durationField:
+        input.mapping?.durationField ??
+        toStringValue(input.sharedAttributes.durationField) ??
+        toStringValue(input.clientAttributes.durationField) ??
+        "duration_s",
+      commandIdField:
+        input.mapping?.commandIdField ??
+        toStringValue(input.sharedAttributes.commandIdField) ??
+        toStringValue(input.clientAttributes.commandIdField) ??
+        "command_id",
+      openCommandId:
+        input.mapping?.openCommandId ??
+        toInt(input.sharedAttributes.openCommandId) ??
+        toInt(input.clientAttributes.openCommandId) ??
+        1001,
+      closeCommandId:
+        input.mapping?.closeCommandId ??
+        toInt(input.sharedAttributes.closeCommandId) ??
+        toInt(input.clientAttributes.closeCommandId) ??
+        1002,
+    },
+  };
+}
+
+function normalizeDeviceControlMode(value: unknown): DeviceControlMode | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "ble_gateway" || normalized === "ble-gateway" || normalized === "ble") {
+    return "ble_gateway";
+  }
+  if (
+    normalized === "direct_4g" ||
+    normalized === "direct-4g" ||
+    normalized === "4g" ||
+    normalized === "4g_controller" ||
+    normalized === "4g-controller"
+  ) {
+    return "direct_4g";
+  }
+  if (normalized === "direct") {
+    return "direct";
+  }
+  return null;
+}
+
+function looksLikeDirect4gController(value: string) {
+  return /(^|[^A-Z0-9])4G([^A-Z0-9]|$)|4G多路|多路控制器|MULTI.?VALVE|CONTROLLER/i.test(value);
 }
 
 function enrichDeviceSummary(
@@ -1077,12 +1329,33 @@ function enrichDeviceSummary(
     toStringValue(sharedAttributes.targetDeviceName) ??
     toStringValue(clientAttributes.targetDeviceName) ??
     base.rpcTargetName;
+  const controlProfile = resolveDeviceControlProfile({
+    mapping: findDeviceMapping({
+      id: base.id,
+      name: displayName,
+      blePeripheralId,
+    }),
+    info: item,
+    clientAttributes,
+    sharedAttributes,
+    fallbackModel: base.model,
+  });
+  const connectivityState = normalizeRuntimeConnectivityState({
+    controlMode: controlProfile.controlMode,
+    isGateway,
+    gatewayState,
+    platformState,
+    bleConnectivityState,
+  });
 
   return {
     ...base,
     name: displayName,
     blePeripheralId,
     rpcTargetName,
+    controlMode: controlProfile.controlMode,
+    supportsConnectionControl: controlProfile.supportsConnectionControl,
+    hideConnectivityState: controlProfile.hideConnectivityState,
     isGateway,
     gatewayState,
     gatewayHeartbeatAt,
@@ -1090,7 +1363,7 @@ function enrichDeviceSummary(
     statusChangedAt,
     platformState,
     platformLastActivityAt: resolvePlatformLastActivityAt(item, base.platformLastActivityAt),
-    connectivityState: isGateway ? normalizeGatewayConnectivityState(gatewayState) : bleConnectivityState,
+    connectivityState,
     lastSeenAt,
     selectedSiteNumber: clamp(selectedSiteNumber, 1, siteCount),
     siteCount,
@@ -1101,31 +1374,54 @@ function enrichDeviceSummary(
 export async function fetchDeviceDetail(
   session: TbSession | null | undefined,
   deviceId: string,
+  options?: { force?: boolean },
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  const [info, telemetry, clientAttributes, sharedAttributes] = await Promise.all([
-    tbRequest(resolved, `/api/device/info/${deviceId}`),
-    getLatestTelemetry(resolved, deviceId, TELEMETRY_KEYS),
-    getAttributes(resolved, deviceId, "CLIENT_SCOPE", CLIENT_ATTRIBUTE_KEYS),
-    getAttributes(resolved, deviceId, "SHARED_SCOPE", SHARED_ATTRIBUTE_KEYS),
-  ]);
+  const cacheKey = getDeviceDetailCacheKey(resolved, deviceId);
+  const cached = deviceDetailCache.get(cacheKey);
+  const fetchedAt = deviceDetailCacheFetchedAt.get(cacheKey) ?? 0;
+  if (!options?.force && cached && Date.now() - fetchedAt < DEVICE_DETAIL_CACHE_TTL_MS) {
+    return cached;
+  }
 
-  const detail = mapToDeviceState(
-    (info as Record<string, unknown>) ?? {},
-    telemetry,
-    clientAttributes,
-    sharedAttributes,
-  );
-  const rpcGatewayId = await resolveRpcGateway(resolved, detail, clientAttributes);
-  const normalizedDetail = await enrichDeviceDetailSiteCountFromGateway(
-    resolved,
-    detail,
-    rpcGatewayId,
-    clientAttributes,
-    sharedAttributes,
-  );
-  deviceDetailCache.set(getDeviceDetailCacheKey(resolved, deviceId), normalizedDetail);
-  return normalizedDetail;
+  const inflight = deviceDetailInflight.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const request = (async () => {
+    const [info, telemetry, clientAttributes, sharedAttributes] = await Promise.all([
+      tbRequest(resolved, `/api/device/info/${deviceId}`),
+      getLatestTelemetry(resolved, deviceId, TELEMETRY_KEYS),
+      getAttributes(resolved, deviceId, "CLIENT_SCOPE", CLIENT_ATTRIBUTE_KEYS),
+      getAttributes(resolved, deviceId, "SHARED_SCOPE", SHARED_ATTRIBUTE_KEYS),
+    ]);
+
+    const detail = mapToDeviceState(
+      (info as Record<string, unknown>) ?? {},
+      telemetry,
+      clientAttributes,
+      sharedAttributes,
+    );
+    const rpcGatewayId = await resolveRpcGateway(resolved, detail, clientAttributes);
+    const normalizedDetail = await enrichDeviceDetailSiteCountFromGateway(
+      resolved,
+      detail,
+      rpcGatewayId,
+      clientAttributes,
+      sharedAttributes,
+    );
+    deviceDetailCache.set(cacheKey, normalizedDetail);
+    deviceDetailCacheFetchedAt.set(cacheKey, Date.now());
+    return normalizedDetail;
+  })();
+
+  deviceDetailInflight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    deviceDetailInflight.delete(cacheKey);
+  }
 }
 
 export function getCachedDeviceDetail(
@@ -1145,12 +1441,6 @@ export async function connectDevice(
   deviceId: string,
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  emitDebugLog({
-    level: "info",
-    scope: "rpc",
-    message: "发送连接命令",
-    detail: serializeDetail({ deviceId }),
-  });
   return performControlAction(resolved, deviceId, "connect", async (detail) => {
     const rpcId = await resolveRpcGateway(resolved, detail);
     await sendRpc(resolved, rpcId, "ble_connectDevice", {
@@ -1166,12 +1456,6 @@ export async function disconnectDevice(
   deviceId: string,
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  emitDebugLog({
-    level: "info",
-    scope: "rpc",
-    message: "发送断开命令",
-    detail: serializeDetail({ deviceId }),
-  });
   return performControlAction(resolved, deviceId, "disconnect", async (detail) => {
     await sendDeviceRpc(resolved, detail, "ble_disconnectDevice", {
       deviceName: detail.rpcTargetName || detail.name,
@@ -1185,13 +1469,10 @@ export async function refreshDevice(
   deviceId: string,
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  emitDebugLog({
-    level: "info",
-    scope: "rpc",
-    message: "发送刷新命令",
-    detail: serializeDetail({ deviceId }),
-  });
   return performControlAction(resolved, deviceId, "refresh", async (detail) => {
+    if (detail.controlMode !== "ble_gateway") {
+      return { message: "已刷新平台缓存状态" };
+    }
     await sendDeviceRpc(resolved, detail, "ble_requestDeviceState", {
       deviceName: detail.rpcTargetName || detail.name,
     });
@@ -1206,19 +1487,20 @@ export async function runIrrigation(
   durationSeconds: number,
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  emitDebugLog({
-    level: "info",
-    scope: "rpc",
-    message: "发送开阀命令",
-    detail: serializeDetail({ deviceId, siteNumber, durationSeconds }),
-  });
   return performControlAction(resolved, deviceId, "run", async (detail) => {
-    await sendDeviceRpc(resolved, detail, "openValve", {
-      deviceName: detail.rpcTargetName || detail.name,
-      stationId: "1",
-      siteNumber,
-      manualDurationSeconds: durationSeconds,
-    });
+    const method =
+      detail.controlMode === "ble_gateway" ? "openValve" : resolveValveRpcMethod(detail, "run");
+    const params =
+      detail.controlMode === "ble_gateway"
+        ? {
+            deviceName: detail.rpcTargetName || detail.name,
+            stationId: "1",
+            siteNumber,
+            manualDurationSeconds: durationSeconds,
+          }
+        : buildDirectValveRpcParams(detail, "run", siteNumber, durationSeconds);
+    guardDuplicateDirectRpc(detail, "run", siteNumber, durationSeconds);
+    await sendDeviceRpc(resolved, detail, method, params);
     return {
       message: `已向 ThingsBoard 下发 ${siteNumber} 号路开阀命令`,
       siteNumber,
@@ -1233,18 +1515,19 @@ export async function stopIrrigation(
   siteNumber: number,
 ): Promise<DeviceState> {
   const resolved = resolveRequiredSession(session);
-  emitDebugLog({
-    level: "info",
-    scope: "rpc",
-    message: "发送关阀命令",
-    detail: serializeDetail({ deviceId, siteNumber }),
-  });
   return performControlAction(resolved, deviceId, "stop", async (detail) => {
-    await sendDeviceRpc(resolved, detail, "openValve", {
-      deviceName: detail.rpcTargetName || detail.name,
-      stationId: "0",
-      siteNumber,
-    });
+    const method =
+      detail.controlMode === "ble_gateway" ? "openValve" : resolveValveRpcMethod(detail, "stop");
+    const params =
+      detail.controlMode === "ble_gateway"
+        ? {
+            deviceName: detail.rpcTargetName || detail.name,
+            stationId: "0",
+            siteNumber,
+          }
+        : buildDirectValveRpcParams(detail, "stop", siteNumber);
+    guardDuplicateDirectRpc(detail, "stop", siteNumber);
+    await sendDeviceRpc(resolved, detail, method, params);
     return {
       message: `已向 ThingsBoard 下发 ${siteNumber} 号路关阀命令`,
       siteNumber,
@@ -1475,9 +1758,17 @@ function clearTbClientCaches() {
   deviceListCache.clear();
   deviceListCacheMode.clear();
   deviceListCacheFetchedAt.clear();
+  deviceListInflight.clear();
   deviceDetailCache.clear();
+  deviceDetailCacheFetchedAt.clear();
+  deviceDetailInflight.clear();
   fieldAssetCache.clear();
   fieldAssetCacheFetchedAt.clear();
+  fieldAssetInflight.clear();
+  currentUserCache.clear();
+  currentUserInflight.clear();
+  tbRateLimitedUntil.clear();
+  recentDirectRpcCommands.clear();
   clearPersistedFieldAssetRecords();
 }
 
@@ -1762,7 +2053,7 @@ async function performControlAction(
     detail: DeviceState,
   ) => Promise<{ message: string; siteNumber?: number; durationSeconds?: number }>,
 ) {
-  const detail = await fetchDeviceDetail(session, deviceId);
+  const detail = await fetchDeviceDetail(session, deviceId, { force: true });
   const commandMeta = await execute(detail);
   const refreshed = await refreshAfterControl(session, deviceId);
   refreshed.lastCommand = {
@@ -1777,10 +2068,10 @@ async function performControlAction(
 }
 
 async function refreshAfterControl(session: TbSession, deviceId: string) {
-  let latest = await fetchDeviceDetail(session, deviceId);
+  let latest = await fetchDeviceDetail(session, deviceId, { force: true });
   for (const delayMs of CONTROL_REFRESH_DELAYS_MS) {
     await wait(delayMs);
-    latest = await fetchDeviceDetail(session, deviceId);
+    latest = await fetchDeviceDetail(session, deviceId, { force: true });
   }
   return latest;
 }
@@ -1790,6 +2081,9 @@ async function resolveRpcGateway(
   detail: DeviceState,
   knownClientAttributes?: Record<string, unknown>,
 ) {
+  if (detail.controlMode !== "ble_gateway") {
+    return detail.id;
+  }
   const mapping = findDeviceMapping(detail);
   if (mapping?.rpcDeviceId) {
     detail.rpcGatewayId = mapping.rpcDeviceId;
@@ -1870,6 +2164,62 @@ async function discoverRpcGateway(session: TbSession) {
   return matches.find((item): item is { id: string; name: string; expiresAt: number } => item !== null);
 }
 
+function resolveValveRpcMethod(
+  detail: DeviceState,
+  action: "run" | "stop",
+) {
+  const fallbackMethod =
+    detail.controlMode === "direct_4g"
+      ? action === "run"
+        ? "open_valve"
+        : "close_valve"
+      : "openValve";
+  if (action === "run") {
+    return detail.valveRpc.openRpcMethod || detail.valveRpc.rpcMethod || fallbackMethod;
+  }
+  return detail.valveRpc.closeRpcMethod || detail.valveRpc.rpcMethod || fallbackMethod;
+}
+
+function buildDirectValveRpcParams(
+  detail: DeviceState,
+  action: "run" | "stop",
+  siteNumber: number,
+  durationSeconds?: number,
+) {
+  const params: Record<string, unknown> = {
+    [detail.valveRpc.valveField]: siteNumber,
+    [detail.valveRpc.commandIdField]:
+      action === "run" ? detail.valveRpc.openCommandId : detail.valveRpc.closeCommandId,
+  };
+  if (action === "run" && typeof durationSeconds === "number" && durationSeconds > 0) {
+    params[detail.valveRpc.durationField] = durationSeconds;
+  }
+  return params;
+}
+
+function guardDuplicateDirectRpc(
+  detail: DeviceState,
+  action: "run" | "stop",
+  siteNumber: number,
+  durationSeconds?: number,
+) {
+  if (detail.controlMode !== "direct_4g") {
+    return;
+  }
+  const now = Date.now();
+  const key = [
+    detail.id,
+    action,
+    siteNumber,
+    durationSeconds ?? "",
+  ].join(":");
+  const lastSentAt = recentDirectRpcCommands.get(key) ?? 0;
+  if (now - lastSentAt < 5_000) {
+    throw new Error("相同 4G 控制命令刚刚已下发，请等待设备状态更新后再操作。");
+  }
+  recentDirectRpcCommands.set(key, now);
+}
+
 async function sendDeviceRpc(
   session: TbSession,
   detail: DeviceState,
@@ -1883,7 +2233,13 @@ async function sendDeviceRpc(
           { kind: "child", id: detail.id, name: detail.name },
           { kind: "gateway", id: gatewayId, name: detail.rpcGatewayName || gatewayId },
         ]
-      : [{ kind: "gateway", id: gatewayId || detail.id, name: detail.rpcGatewayName || detail.name }];
+      : [
+          {
+            kind: detail.controlMode === "ble_gateway" ? "gateway" : "device",
+            id: gatewayId || detail.id,
+            name: detail.rpcGatewayName || detail.name,
+          },
+        ];
 
   let lastError: unknown;
   for (const target of targets) {
@@ -1905,7 +2261,9 @@ async function sendDeviceRpc(
     });
 
     try {
-      await sendRpc(session, target.id, method, params);
+      await sendRpc(session, target.id, method, params, {
+        retryOnConflict: detail.controlMode === "ble_gateway",
+      });
       return;
     } catch (error) {
       lastError = error;
@@ -1917,6 +2275,11 @@ async function sendDeviceRpc(
           detail: error instanceof Error ? error.message : String(error),
         });
         continue;
+      }
+      if (detail.controlMode === "direct_4g" && isRpcConflictError(error)) {
+        throw new Error(
+          "ThingsBoard 拒绝 4G 设备 RPC（409）。设备在列表中“活跃”代表最近有上报，但 ThingsBoard 当前没有可用的服务端 RPC 通道；请确认设备端正在监听 RPC，或稍后重试。",
+        );
       }
       throw error;
     }
@@ -1930,6 +2293,7 @@ async function sendRpc(
   deviceId: string,
   method: string,
   params: Record<string, unknown>,
+  options: { retryOnConflict?: boolean } = {},
 ) {
   try {
     await tbRequest(session, `/api/plugins/rpc/oneway/${deviceId}`, {
@@ -1941,7 +2305,7 @@ async function sendRpc(
       }),
     });
   } catch (error) {
-    if (!isRpcConflictError(error)) {
+    if (!isRpcConflictError(error) || !options.retryOnConflict) {
       throw error;
     }
     gatewayCache.delete(`${session.baseUrl}:${session.user.id}`);
@@ -2938,8 +3302,15 @@ function normalizeRecord(value: unknown): Record<string, unknown> {
 }
 
 async function tbRequest(session: TbSession, path: string, init: RequestInit = {}) {
-  const url = `${normalizeBaseUrl(session.baseUrl)}${path}`;
+  const baseUrl = normalizeBaseUrl(session.baseUrl);
+  const url = `${baseUrl}${path}`;
   const isRpcRequest = path.includes("/api/plugins/rpc/");
+  const rateLimitedUntil = tbRateLimitedUntil.get(baseUrl) ?? 0;
+  if (rateLimitedUntil > Date.now()) {
+    throw new Error(
+      `ThingsBoard 正在限流，${Math.ceil((rateLimitedUntil - Date.now()) / 1000)} 秒后再试。`,
+    );
+  }
   let response: Response;
   try {
     response = await fetch(url, {
@@ -2967,6 +3338,9 @@ async function tbRequest(session: TbSession, path: string, init: RequestInit = {
 
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 429) {
+      tbRateLimitedUntil.set(baseUrl, Date.now() + resolveRetryAfterMs(response));
+    }
     if (response.status === 401) {
       expireLocalSessionAndRedirect(text);
     }
@@ -2997,6 +3371,22 @@ async function tbRequest(session: TbSession, path: string, init: RequestInit = {
     detail: serializeDetail(payload),
   });
   return payload;
+}
+
+function resolveRetryAfterMs(response: Response) {
+  const retryAfter = response.headers.get("Retry-After");
+  if (!retryAfter) {
+    return 60_000;
+  }
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(5 * 60_000, Math.max(15_000, seconds * 1000));
+  }
+  const retryAt = Date.parse(retryAfter);
+  if (Number.isFinite(retryAt)) {
+    return Math.min(5 * 60_000, Math.max(15_000, retryAt - Date.now()));
+  }
+  return 60_000;
 }
 
 function mapToDeviceState(
@@ -3061,25 +3451,44 @@ function mapToDeviceState(
 
   const sites = Array.from({ length: siteCount }, (_, index) => {
     const siteNumber = index + 1;
+    const valveState = normalizeSiteValveState(telemetry, siteNumber);
     return {
       siteNumber,
       label: `站点${siteNumber}`,
-      open: toBoolean(telemetry[`station${siteNumber}Open`]) ?? false,
+      valveState,
+      open: valveState === "open",
       remainingSeconds: toInt(telemetry[`station${siteNumber}RemainingSeconds`]) ?? 0,
       openingDurationSeconds:
         toInt(telemetry[`station${siteNumber}OpeningDurationSeconds`]) ?? 0,
-      manualDurationSeconds: toInt(sharedAttributes.manualDurationSeconds) ?? 600,
+      manualDurationSeconds:
+        toInt(sharedAttributes.manualDurationSeconds) ?? DEVICE_DETAIL_DEFAULT_MANUAL_DURATION_SECONDS,
     };
   });
 
   const lastCommand = buildLastCommand(telemetry, clientAttributes);
   const platformState = resolvePlatformState(info);
+  const controlProfile = resolveDeviceControlProfile({
+    mapping,
+    info,
+    clientAttributes,
+    sharedAttributes,
+    fallbackModel:
+      mapping?.model ||
+      (typeof info.type === "string" ? info.type : undefined) ||
+      (typeof info.label === "string" ? info.label : undefined),
+  });
   const deviceIdentity = {
     name: displayName,
     serialNumber: mapping?.serialNumber || displayName || (infoId?.id ?? ""),
     platformState,
     connectivityState: "disconnected" as ConnectivityState,
   };
+  const bleConnectivityState = normalizeBleConnectivityState(clientAttributes, deviceIdentity);
+  const connectivityState = normalizeRuntimeConnectivityState({
+    controlMode: controlProfile.controlMode,
+    platformState,
+    bleConnectivityState,
+  });
 
   return {
     id: infoId?.id ?? "",
@@ -3106,9 +3515,13 @@ function mapToDeviceState(
       "",
     rpcGatewayId: mapping?.rpcDeviceId,
     rpcGatewayName: mapping?.rpcGatewayName,
+    controlMode: controlProfile.controlMode,
+    supportsConnectionControl: controlProfile.supportsConnectionControl,
+    hideConnectivityState: controlProfile.hideConnectivityState,
+    valveRpc: controlProfile.valveRpc,
     platformState,
     platformLastActivityAt: resolvePlatformLastActivityAt(info),
-    connectivityState: normalizeBleConnectivityState(clientAttributes, deviceIdentity),
+    connectivityState,
     lastSeenAt: lastSeenAt || Date.now(),
     signalRssi: -70,
     siteCount,
@@ -3157,16 +3570,18 @@ function applySiteCount(detail: DeviceState, nextSiteCount: number): DeviceState
     const siteNumber = index + 1;
     const current = detail.sites.find((site) => site.siteNumber === siteNumber);
     return (
-      current ?? {
-        siteNumber,
-        label: `站点${siteNumber}`,
-        open: false,
-        remainingSeconds: 0,
-        openingDurationSeconds: 0,
-        manualDurationSeconds: detail.sites[0]?.manualDurationSeconds ?? 600,
-      }
-    );
-  });
+        current ?? {
+          siteNumber,
+          label: `站点${siteNumber}`,
+          valveState: "unknown" as const,
+          open: false,
+          remainingSeconds: 0,
+          openingDurationSeconds: 0,
+          manualDurationSeconds:
+            detail.sites[0]?.manualDurationSeconds ?? DEVICE_DETAIL_DEFAULT_MANUAL_DURATION_SECONDS,
+        }
+      );
+    });
   return {
     ...detail,
     siteCount,
@@ -3605,6 +4020,85 @@ function normalizeGatewayConnectivityState(gatewayState?: GatewayState): Connect
   return gatewayState === "online" ? "connected" : "disconnected";
 }
 
+function normalizeRuntimeConnectivityState(input: {
+  controlMode?: DeviceControlMode;
+  isGateway?: boolean;
+  gatewayState?: GatewayState;
+  platformState: PlatformState;
+  bleConnectivityState: ConnectivityState;
+}): ConnectivityState {
+  if (input.isGateway) {
+    return normalizeGatewayConnectivityState(input.gatewayState);
+  }
+  if (input.controlMode === "direct_4g") {
+    return input.platformState === "active" ? "connected" : "disconnected";
+  }
+  return input.bleConnectivityState;
+}
+
+function normalizeSiteValveState(
+  telemetry: Record<string, unknown>,
+  siteNumber: number,
+): "open" | "closed" | "unknown" {
+  const direct4gState = normalizeValveStateValue(telemetry[`v${siteNumber}_state`]);
+  if (direct4gState) {
+    return direct4gState;
+  }
+
+  const stationOpen = toBoolean(telemetry[`station${siteNumber}Open`]);
+  if (stationOpen === true) {
+    return "open";
+  }
+  if (stationOpen === false) {
+    return "closed";
+  }
+
+  return "unknown";
+}
+
+function normalizeValveStateValue(value: unknown): "open" | "closed" | "unknown" | null {
+  if (typeof value === "boolean") {
+    return value ? "open" : "closed";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value === 0 ? "closed" : "open";
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized === "open" ||
+    normalized === "opened" ||
+    normalized === "on" ||
+    normalized === "running" ||
+    normalized === "active" ||
+    normalized === "true" ||
+    normalized === "1"
+  ) {
+    return "open";
+  }
+  if (
+    normalized === "closed" ||
+    normalized === "close" ||
+    normalized === "off" ||
+    normalized === "stopped" ||
+    normalized === "inactive" ||
+    normalized === "false" ||
+    normalized === "0"
+  ) {
+    return "closed";
+  }
+  if (normalized === "unknown" || normalized === "unkown") {
+    return "unknown";
+  }
+  return null;
+}
+
 function resolvePlatformState(
   item: Record<string, unknown>,
   fallback: "active" | "inactive" = "inactive",
@@ -3660,10 +4154,33 @@ function canUseCustomerScope(user: Partial<IrrigationUser> | null | undefined) {
 }
 
 async function fetchCurrentUser(baseUrl: string, token: string) {
+  const cacheKey = `${normalizeBaseUrl(baseUrl)}::${token}`;
+  const cached = currentUserCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < CURRENT_USER_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const inflight = currentUserInflight.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const request = (async () => {
+    try {
+      const user = await tbFetchJson(baseUrl, token, "/api/auth/user");
+      currentUserCache.set(cacheKey, { value: user, fetchedAt: Date.now() });
+      return user;
+    } catch {
+      currentUserCache.set(cacheKey, { value: null, fetchedAt: Date.now() });
+      return null;
+    }
+  })();
+
+  currentUserInflight.set(cacheKey, request);
   try {
-    return await tbFetchJson(baseUrl, token, "/api/auth/user");
-  } catch {
-    return null;
+    return await request;
+  } finally {
+    currentUserInflight.delete(cacheKey);
   }
 }
 

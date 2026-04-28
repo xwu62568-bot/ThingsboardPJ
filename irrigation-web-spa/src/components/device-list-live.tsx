@@ -166,6 +166,13 @@ function deriveDevicePatchFromWs(
         device.bleConnectivityState ?? device.connectivityState,
       )
     : device.bleConnectivityState ?? device.connectivityState;
+  const connectivityState = resolveListConnectivityState({
+    controlMode: device.controlMode,
+    isGateway,
+    gatewayState,
+    platformState: device.platformState,
+    bleConnectivityState,
+  });
 
   return {
     platformLastActivityAt: nextTs,
@@ -175,7 +182,7 @@ function deriveDevicePatchFromWs(
     gatewayHeartbeatAt,
     bleConnectivityState,
     statusChangedAt,
-    connectivityState: isGateway ? normalizeGatewayConnectivityState(gatewayState) : bleConnectivityState,
+    connectivityState,
     batteryLevel: isGateway ? device.batteryLevel : toNumberOrCurrent(batteryLevel, device.batteryLevel),
     siteCount: isGateway ? device.siteCount : clampInt(siteCount, 1, 8, device.siteCount),
     selectedSiteNumber: isGateway
@@ -211,6 +218,22 @@ function normalizeGatewayStateFromWs(
 
 function normalizeGatewayConnectivityState(gatewayState?: GatewayState): ConnectivityState {
   return gatewayState === "online" ? "connected" : "disconnected";
+}
+
+function resolveListConnectivityState(input: {
+  controlMode: DeviceSummary["controlMode"];
+  isGateway: boolean;
+  gatewayState?: GatewayState;
+  platformState: DeviceSummary["platformState"];
+  bleConnectivityState: ConnectivityState;
+}): ConnectivityState {
+  if (input.isGateway) {
+    return normalizeGatewayConnectivityState(input.gatewayState);
+  }
+  if (input.controlMode === "direct_4g") {
+    return input.platformState === "active" ? "connected" : "disconnected";
+  }
+  return input.bleConnectivityState;
 }
 
 function isGatewayWsPayload(appMode: unknown, rpcMethods: unknown): boolean {
@@ -297,6 +320,9 @@ function formatConnectionState(device: DeviceSummary) {
         return "网关未知";
     }
   }
+  if (device.controlMode === "direct_4g") {
+    return device.platformState === "active" ? "已连接" : "未连接";
+  }
   switch (device.bleConnectivityState ?? device.connectivityState) {
     case "connected":
       return "已连接";
@@ -311,6 +337,9 @@ function formatConnectionState(device: DeviceSummary) {
 
 function getStatusPillClass(device: DeviceSummary): ConnectivityState {
   if (!device.isGateway) {
+    if (device.controlMode === "direct_4g") {
+      return device.platformState === "active" ? "connected" : "disconnected";
+    }
     return device.bleConnectivityState ?? device.connectivityState;
   }
   return resolveDisplayGatewayState(device) === "online" ? "connected" : "disconnected";

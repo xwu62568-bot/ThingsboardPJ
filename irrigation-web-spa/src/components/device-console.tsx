@@ -17,15 +17,18 @@ type Props = {
   initialDevice: DeviceState;
   devices: DeviceSummary[];
   activeDeviceId: string;
+  onDeviceChange?: (device: DeviceState) => void;
 };
 
 type ActionKind = "connect" | "disconnect" | "refresh" | "run" | "stop" | null;
 const AUTO_REFRESH_MIN_INTERVAL_MS = 30_000;
+const DEFAULT_MANUAL_DURATION_SECONDS = 60;
 
 export function DeviceConsole({
   initialDevice,
   devices,
   activeDeviceId,
+  onDeviceChange,
 }: Props) {
   const [device, setDevice] = useState(() =>
     reconcileDeviceSiteCount(initialDevice, devices, activeDeviceId),
@@ -38,7 +41,7 @@ export function DeviceConsole({
     String(
       initialDevice.sites.find(
         (site) => site.siteNumber === initialDevice.selectedSiteNumber,
-      )?.manualDurationSeconds ?? 600,
+      )?.manualDurationSeconds ?? DEFAULT_MANUAL_DURATION_SECONDS,
     ),
   );
   const [pendingAction, setPendingAction] = useState<ActionKind>(null);
@@ -73,7 +76,7 @@ export function DeviceConsole({
   useEffect(() => {
     const nextCurrentSite =
       device.sites.find((site) => site.siteNumber === selectedSiteNumber) ?? device.sites[0];
-    setDurationSeconds(String(nextCurrentSite?.manualDurationSeconds ?? 600));
+    setDurationSeconds(String(nextCurrentSite?.manualDurationSeconds ?? DEFAULT_MANUAL_DURATION_SECONDS));
   }, [device.sites, selectedSiteNumber]);
 
   useEffect(() => {
@@ -99,6 +102,7 @@ export function DeviceConsole({
         lastAutoRefreshAtRef.current = Date.now();
         void fetchDeviceDetail(null, activeDeviceId)
           .then((nextDevice) => {
+            onDeviceChange?.(nextDevice);
             setDevice((current) =>
               reconcileDeviceSiteCount(
                 nextDevice,
@@ -144,7 +148,7 @@ export function DeviceConsole({
         ws.close();
       }
     };
-  }, [activeDeviceId]);
+  }, [activeDeviceId, onDeviceChange]);
 
   const runAction = async (
     action: Exclude<ActionKind, null>,
@@ -174,6 +178,7 @@ export function DeviceConsole({
       }
 
       const nextDevice = await operation();
+      onDeviceChange?.(nextDevice);
       setDevice((current) =>
         reconcileDeviceSiteCount(
           nextDevice,
@@ -212,11 +217,13 @@ export function DeviceConsole({
               value={formatPlatformState(device.platformState)}
               tone={device.platformState === "active" ? "good" : "warn"}
             />
-            <MetricCard
-              label="连接状态"
-              value={formatConnectionState(device.connectivityState)}
-              tone={device.connectivityState === "connected" ? "good" : "warn"}
-            />
+            {device.hideConnectivityState ? null : (
+              <MetricCard
+                label="连接状态"
+                value={formatConnectionState(device.connectivityState)}
+                tone={device.connectivityState === "connected" ? "good" : "warn"}
+              />
+            )}
             <MetricCard
               label="电量"
               value={`${device.batteryLevel}%`}
@@ -231,39 +238,59 @@ export function DeviceConsole({
           <div className="panel">
             <div className="panelHeader">
               <div>
-                <div className="panelTitle">连接控制</div>
-                <p className="muted">用于现场设备连接、断开和状态刷新。</p>
+                <div className="panelTitle">
+                  {device.supportsConnectionControl ? "连接控制" : "设备信息"}
+                </div>
+                <p className="muted">
+                  {device.supportsConnectionControl
+                    ? "用于现场设备连接、断开和状态刷新。"
+                    : "4G 多路控制器不展示连接状态，仅保留设备基础信息与状态刷新。"}
+                </p>
               </div>
             </div>
-            <div className="actionRow">
-              <button
-                className="primaryButton"
-                disabled={pendingAction !== null}
-                onClick={() => {
-                  void runAction("connect", () => connectDevice(null, device.id));
-                }}
-              >
-                {pendingAction === "connect" ? "连接中..." : "连接设备"}
-              </button>
-              <button
-                className="ghostButton"
-                disabled={pendingAction !== null}
-                onClick={() => {
-                  void runAction("disconnect", () => disconnectDevice(null, device.id));
-                }}
-              >
-                断开连接
-              </button>
-              <button
-                className="ghostButton"
-                disabled={pendingAction !== null}
-                onClick={() => {
-                  void runAction("refresh", () => refreshDevice(null, device.id));
-                }}
-              >
-                刷新状态
-              </button>
-            </div>
+            {device.supportsConnectionControl ? (
+              <div className="actionRow">
+                <button
+                  className="primaryButton"
+                  disabled={pendingAction !== null}
+                  onClick={() => {
+                    void runAction("connect", () => connectDevice(null, device.id));
+                  }}
+                >
+                  {pendingAction === "connect" ? "连接中..." : "连接设备"}
+                </button>
+                <button
+                  className="ghostButton"
+                  disabled={pendingAction !== null}
+                  onClick={() => {
+                    void runAction("disconnect", () => disconnectDevice(null, device.id));
+                  }}
+                >
+                  断开连接
+                </button>
+                <button
+                  className="ghostButton"
+                  disabled={pendingAction !== null}
+                  onClick={() => {
+                    void runAction("refresh", () => refreshDevice(null, device.id));
+                  }}
+                >
+                  刷新状态
+                </button>
+              </div>
+            ) : (
+              <div className="actionRow">
+                <button
+                  className="ghostButton"
+                  disabled={pendingAction !== null}
+                  onClick={() => {
+                    void runAction("refresh", () => refreshDevice(null, device.id));
+                  }}
+                >
+                  刷新状态
+                </button>
+              </div>
+            )}
             <dl className="infoList">
               <InfoRow
                 label="平台活跃"
@@ -281,7 +308,9 @@ export function DeviceConsole({
                 label="控制通道"
                 value={device.rpcGatewayName || device.rpcGatewayId || "自动发现中"}
               />
-              <InfoRow label="RSSI" value={`${device.signalRssi} dBm`} />
+              {device.hideConnectivityState ? null : (
+                <InfoRow label="RSSI" value={`${device.signalRssi} dBm`} />
+              )}
               <InfoRow label="RTC 时间" value={formatTime(device.rtcTimestamp)} />
               <InfoRow label="选中站点" value={`${device.selectedSiteNumber} / ${device.siteCount}`} />
               <InfoRow label="电压" value={`${device.batteryVoltage.toFixed(2)} V`} />
@@ -356,7 +385,7 @@ export function DeviceConsole({
             <div className="subtleBlock">
               <strong>当前选中</strong>
               <p>
-                {currentSite.label} · {currentSite.open ? "运行中" : "待机"} · 剩余{" "}
+                {currentSite.label} · {formatValveState(currentSite.valveState)} · 剩余{" "}
                 {formatSeconds(currentSite.remainingSeconds)}
               </p>
             </div>
@@ -401,7 +430,7 @@ export function DeviceConsole({
                   </div>
                   <div className="siteMeta">
                     <span className={`statusPill ${site.open ? "connected" : "disconnected"}`}>
-                      {site.open ? "运行中" : "已关闭"}
+                      {formatValveState(site.valveState)}
                     </span>
                     <span>{formatSeconds(site.remainingSeconds)}</span>
                   </div>
@@ -465,6 +494,16 @@ function formatPlatformState(state: DeviceState["platformState"]) {
   return state === "active" ? "活跃" : "未活跃";
 }
 
+function formatValveState(state: DeviceState["sites"][number]["valveState"]) {
+  if (state === "open") {
+    return "运行中";
+  }
+  if (state === "closed") {
+    return "已关闭";
+  }
+  return "未知";
+}
+
 function formatWsState(state: "connecting" | "connected" | "disconnected" | "error") {
   switch (state) {
     case "connected":
@@ -520,10 +559,11 @@ function reconcileDeviceSiteCount(
         current ?? {
           siteNumber,
           label: `站点${siteNumber}`,
+          valveState: "unknown",
           open: false,
           remainingSeconds: 0,
           openingDurationSeconds: 0,
-          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? 600,
+          manualDurationSeconds: device.sites[0]?.manualDurationSeconds ?? DEFAULT_MANUAL_DURATION_SECONDS,
         }
       );
     }),
@@ -540,6 +580,9 @@ function deviceListForReconcile(device: DeviceState, devices: DeviceSummary[]) {
       name: device.name,
       model: device.model,
       serialNumber: device.serialNumber,
+      controlMode: device.controlMode,
+      supportsConnectionControl: device.supportsConnectionControl,
+      hideConnectivityState: device.hideConnectivityState,
       platformState: device.platformState,
       platformLastActivityAt: device.platformLastActivityAt,
       connectivityState: device.connectivityState,

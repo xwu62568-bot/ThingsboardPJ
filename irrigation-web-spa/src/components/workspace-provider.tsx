@@ -2,9 +2,11 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -14,7 +16,6 @@ import {
   fetchFieldAssetRecords,
   fetchDeviceDetail,
   fetchDeviceList,
-  fetchDeviceListBasic,
   getCachedDeviceDetail,
   getCachedDeviceList,
   getCachedFieldAssetRecords,
@@ -45,9 +46,11 @@ type WorkspaceContextValue = {
   refreshDevices: () => Promise<void>;
   refreshFields: () => Promise<void>;
   refreshWorkspace: () => Promise<void>;
+  updateDeviceFromDetail: (device: DeviceState) => void;
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
+const ROUTE_REFRESH_MIN_INTERVAL_MS = 60_000;
 
 export function WorkspaceProvider({ children }: PropsWithChildren) {
   const navigate = useNavigate();
@@ -60,6 +63,14 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
   const [deviceDetailsById, setDeviceDetailsById] = useState<Record<string, DeviceState>>({});
   const [loading, setLoading] = useState(() => cachedDevices.length === 0 && cachedFields.length === 0);
   const [error, setError] = useState("");
+  const lastRefreshedPathRef = useRef(location.pathname);
+  const lastRouteRefreshAtRef = useRef(0);
+  const didInitialLoadRef = useRef(false);
+
+  const updateDeviceFromDetail = useCallback((device: DeviceState) => {
+    setDevices((current) => updateDeviceSummaryFromDetail(current, device));
+    setDeviceDetailsById((current) => ({ ...current, [device.id]: device }));
+  }, []);
 
   const mergeFieldRecords = (nextRecords: TbFieldAssetRecord[]) => {
     setFieldRecords((current) => {
@@ -75,21 +86,23 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
       navigate("/login", { replace: true });
       return;
     }
+    if (didInitialLoadRef.current) {
+      return;
+    }
+    didInitialLoadRef.current = true;
 
     let disposed = false;
 
     const load = async () => {
       try {
-        if (devices.length === 0) {
+        if (devices.length === 0 && fieldRecords.length === 0) {
           setLoading(true);
-          const basic = await fetchDeviceListBasic(session);
-          if (disposed) {
-            return;
-          }
-          setDevices(basic);
         }
+        const shouldFetchFullDevices = location.pathname.startsWith("/devices");
         const [full, fieldsFromTb] = await Promise.all([
-          hasFullCachedDeviceList(session) ? Promise.resolve(getCachedDeviceList(session)) : fetchDeviceList(session),
+          shouldFetchFullDevices || !hasFullCachedDeviceList(session)
+            ? fetchDeviceList(session, { enrich: shouldFetchFullDevices })
+            : Promise.resolve(getCachedDeviceList(session)),
           fetchFieldAssetRecords(session).catch((fieldError) => {
             console.warn("[workspace] 地块资产读取失败，使用设备推导地块", fieldError);
             return [];
@@ -104,7 +117,7 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         }
         setDevices(full);
         mergeFieldRecords(fieldsFromTb);
-        setDeviceDetailsById(linkedDeviceDetails);
+        setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
         setError("");
       } catch (loadError) {
         if (!disposed) {
@@ -121,10 +134,22 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
     return () => {
       disposed = true;
     };
-  }, [devices.length, navigate, session]);
+  }, [fieldRecords.length, location.pathname, navigate, session]);
 
   useEffect(() => {
     if (!session) {
+      return;
+    }
+    if (lastRefreshedPathRef.current === location.pathname) {
+      return;
+    }
+    lastRefreshedPathRef.current = location.pathname;
+    const isDevicesRoute = location.pathname.startsWith("/devices");
+    const needsFullDeviceList = isDevicesRoute && !hasFullCachedDeviceList(session);
+    if (
+      !needsFullDeviceList &&
+      Date.now() - lastRouteRefreshAtRef.current < ROUTE_REFRESH_MIN_INTERVAL_MS
+    ) {
       return;
     }
 
@@ -132,14 +157,17 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
 
     const refreshOnMenuSwitch = async () => {
       try {
+        lastRouteRefreshAtRef.current = Date.now();
         const [full, fieldsFromTb] = await Promise.all([
-          fetchDeviceList(session),
-          fetchFieldAssetRecords(session, { force: true }).catch(() => []),
+          fetchDeviceList(session, { enrich: isDevicesRoute }),
+          fetchFieldAssetRecords(session).catch(() => []),
         ]);
         if (disposed) {
           return;
         }
-        const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb);
+        const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb, {
+          allowNetwork: false,
+        });
         if (disposed) {
           return;
         }
@@ -183,7 +211,9 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
       },
       refreshFields: async () => {
         const fieldsFromTb = await fetchFieldAssetRecords(session, { force: true }).catch(() => []);
-        const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb);
+        const linkedDeviceDetails = await fetchLinkedDeviceDetails(session, fieldsFromTb, {
+          allowNetwork: false,
+        });
         mergeFieldRecords(fieldsFromTb);
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
         setError("");
@@ -199,8 +229,9 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
         setDeviceDetailsById((current) => ({ ...current, ...linkedDeviceDetails }));
         setError("");
       },
+      updateDeviceFromDetail,
     };
-  }, [deviceDetailsById, devices, error, fieldRecords, loading, session]);
+  }, [deviceDetailsById, devices, error, fieldRecords, loading, location.pathname, session, updateDeviceFromDetail]);
 
   if (!value) {
     return <main className="appPage">会话检查中...</main>;
@@ -217,7 +248,11 @@ export function useWorkspace() {
   return context;
 }
 
-async function fetchLinkedDeviceDetails(session: TbSession, fieldRecords: TbFieldAssetRecord[]) {
+async function fetchLinkedDeviceDetails(
+  session: TbSession,
+  fieldRecords: TbFieldAssetRecord[],
+  options: { allowNetwork?: boolean } = {},
+) {
   const linkedDeviceIds = Array.from(
     new Set(
       fieldRecords.flatMap((record) => {
@@ -232,17 +267,56 @@ async function fetchLinkedDeviceDetails(session: TbSession, fieldRecords: TbFiel
 
   const details = await Promise.all(
     linkedDeviceIds.map(async (deviceId) => {
+      const cached = getCachedDeviceDetail(session, deviceId);
+      if (cached || !options.allowNetwork) {
+        return cached ? ([deviceId, cached] as const) : null;
+      }
       try {
         const detail = await fetchDeviceDetail(session, deviceId);
         return [deviceId, detail] as const;
       } catch {
-        const cached = getCachedDeviceDetail(session, deviceId);
-        return cached ? ([deviceId, cached] as const) : null;
+        return null;
       }
     }),
   );
 
   return Object.fromEntries(details.filter((entry): entry is readonly [string, DeviceState] => entry !== null));
+}
+
+function updateDeviceSummaryFromDetail(
+  devices: DeviceSummary[],
+  detail: DeviceState,
+): DeviceSummary[] {
+  let matched = false;
+  const nextDevices = devices.map((device) => {
+    if (device.id !== detail.id) {
+      return device;
+    }
+    matched = true;
+    return {
+      ...device,
+      name: detail.name,
+      blePeripheralId: detail.blePeripheralId,
+      model: detail.model,
+      serialNumber: detail.serialNumber,
+      rpcTargetName: detail.rpcTargetName,
+      controlMode: detail.controlMode,
+      supportsConnectionControl: detail.supportsConnectionControl,
+      hideConnectivityState: detail.hideConnectivityState,
+      platformState: detail.platformState,
+      platformLastActivityAt: detail.platformLastActivityAt,
+      connectivityState: detail.connectivityState,
+      lastSeenAt: detail.lastSeenAt,
+      selectedSiteNumber: detail.selectedSiteNumber,
+      siteCount: detail.siteCount,
+      batteryLevel: detail.batteryLevel,
+      statusChangedAt: detail.platformLastActivityAt || detail.lastSeenAt,
+    };
+  });
+  if (matched) {
+    return nextDevices;
+  }
+  return devices;
 }
 
 function applyDeviceRuntimeToFields(fields: FieldSummary[], deviceDetailsById: Record<string, DeviceState>) {

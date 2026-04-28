@@ -662,7 +662,7 @@ function buildDefaultMetadata(ruleChainId, nodeTypes, fieldAssets, options = {})
       configuration: {
         jsScript: buildPlanCommandScript(),
       },
-      description: "计划到点或自动策略命中后，按分区顺序生成下一条 openValve 命令。",
+      description: "计划到点或自动策略命中后，按分区顺序生成下一条设备分区控制命令。",
     }),
     createRuleNode({
       type: nodeTypes.filter,
@@ -751,7 +751,7 @@ function buildDefaultMetadata(ruleChainId, nodeTypes, fieldAssets, options = {})
       configuration: {
         timeoutInSeconds: 30,
       },
-      description: "向目标设备发送 openValve RPC。",
+      description: "向目标设备发送分区控制 RPC，BLE 与 4G 设备自动适配不同 method/params。",
     }),
     createRuleNode({
       type: nodeTypes.log,
@@ -1892,21 +1892,33 @@ if (zoneIndex >= zones.length) {
 
 var zone = zones[zoneIndex];
 var durationSeconds = calculateDurationSeconds(selectedPlan, zone, zones.length, policy);
+function looksLikeDirect4gController(deviceName) {
+  var normalized = String(deviceName || "").toUpperCase();
+  return /(^|[^A-Z0-9])4G([^A-Z0-9]|$)|4G多路|多路控制器|MULTI.?VALVE|CONTROLLER/i.test(normalized);
+}
 var zoneCommands = Array.isArray(zone.deviceBindings)
   ? zone.deviceBindings.map(function(binding, bindingIndex) {
+      var isDirect4g = looksLikeDirect4gController(binding.deviceName);
       return {
-        method: "openValve",
+        method: isDirect4g ? "open_valve" : "openValve",
         deviceId: binding.deviceId,
         deviceName: binding.deviceName,
         order: bindingIndex + 1,
-        params: {
-          stationId: "1",
-          siteNumber: Number(binding.siteNumber),
-          manualDurationSeconds: durationSeconds
-        }
+        params: isDirect4g
+          ? {
+              valve: Number(binding.siteNumber),
+              command_id: 1001,
+              duration_s: durationSeconds
+            }
+          : {
+              stationId: "1",
+              siteNumber: Number(binding.siteNumber),
+              manualDurationSeconds: durationSeconds
+            }
       };
     }).filter(function(command) {
-      return !!command.deviceName && Number(command.params.siteNumber) > 0;
+      return !!command.deviceName &&
+        (Number(command.params.siteNumber) > 0 || Number(command.params.valve) > 0);
     })
   : [];
 var primaryCommand = zoneCommands.length > 0 ? zoneCommands[0] : null;
@@ -1924,20 +1936,21 @@ msg.nextCommand = {
   method: primaryCommand.method,
   deviceId: primaryCommand.deviceId,
   deviceName: primaryCommand.deviceName,
-  params: {
-    stationId: "1",
-    siteNumber: Number(primaryCommand.params.siteNumber),
-    manualDurationSeconds: durationSeconds,
+  params: Object.assign({}, primaryCommand.params, {
     commands: zoneCommands.map(function(command) {
       return {
         deviceId: command.deviceId,
         deviceName: command.deviceName,
+        method: command.method,
         stationId: command.params.stationId,
         siteNumber: command.params.siteNumber,
-        manualDurationSeconds: command.params.manualDurationSeconds
+        manualDurationSeconds: command.params.manualDurationSeconds,
+        valve: command.params.valve,
+        command_id: command.params.command_id,
+        duration_s: command.params.duration_s
       };
     })
-  },
+  }),
   planId: selectedPlan.id,
   planName: selectedPlan.name,
   source: selectedSource || selectedPlan.source || "plan",
@@ -1977,7 +1990,8 @@ msg.debug.selectedSource = selectedSource || selectedPlan.source || "plan";
 msg.debug.zoneCount = zones.length;
 msg.debug.zoneIndex = zoneIndex;
 msg.debug.nextDeviceName = primaryCommand.deviceName;
-msg.debug.nextSiteNumber = primaryCommand.params.siteNumber;
+msg.debug.nextSiteNumber = primaryCommand.params.siteNumber || primaryCommand.params.valve;
+msg.debug.nextMethod = primaryCommand.method;
 msg.debug.commandCount = zoneCommands.length;
 msg.debug.durationSeconds = durationSeconds;
 if (selectedPlan.source === "strategy" && selectedPlan.strategyId) {

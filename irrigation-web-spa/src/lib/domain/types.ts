@@ -19,10 +19,24 @@ export type PlatformState = "active" | "inactive";
 export type SiteState = {
   siteNumber: number;
   label: string;
+  valveState: "open" | "closed" | "unknown";
   open: boolean;
   remainingSeconds: number;
   openingDurationSeconds: number;
   manualDurationSeconds: number;
+};
+
+export type DeviceControlMode = "ble_gateway" | "direct_4g" | "direct";
+
+export type ValveRpcConfig = {
+  rpcMethod?: string;
+  openRpcMethod?: string;
+  closeRpcMethod?: string;
+  valveField: string;
+  durationField: string;
+  commandIdField: string;
+  openCommandId?: number;
+  closeCommandId?: number;
 };
 
 export type DeviceState = {
@@ -34,6 +48,10 @@ export type DeviceState = {
   rpcTargetName: string;
   rpcGatewayId?: string;
   rpcGatewayName?: string;
+  controlMode: DeviceControlMode;
+  supportsConnectionControl: boolean;
+  hideConnectivityState: boolean;
+  valveRpc: ValveRpcConfig;
   platformState: PlatformState;
   platformLastActivityAt: number;
   connectivityState: ConnectivityState;
@@ -65,6 +83,9 @@ export type DeviceSummary = Pick<
   | "name"
   | "model"
   | "serialNumber"
+  | "controlMode"
+  | "supportsConnectionControl"
+  | "hideConnectivityState"
   | "platformState"
   | "platformLastActivityAt"
   | "connectivityState"

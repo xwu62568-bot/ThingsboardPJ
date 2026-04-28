@@ -811,6 +811,8 @@ function AmapFieldCanvas({
   if (!AMAP_KEY || loadState === "error") {
     return (
       <MockFieldMap
+        devices={devices}
+        draftDeviceMarkers={draftDeviceMarkers}
         fields={fields}
         message={!AMAP_KEY ? "未配置高德地图 Key，已切换为预览模式" : "高德地图加载失败"}
         canRetry={Boolean(AMAP_KEY)}
@@ -852,17 +854,37 @@ function MapStatusLegend() {
 
 function MockFieldMap({
   canRetry,
+  devices,
+  draftDeviceMarkers,
   fields,
   message,
   onSelectField,
   onRetry,
 }: {
   canRetry?: boolean;
+  devices: DeviceSummary[];
+  draftDeviceMarkers: Array<{
+    deviceId: string;
+    name: string;
+    role: string;
+    lng: number;
+    lat: number;
+    siteNumber?: number;
+  }>;
   fields: FieldSummary[];
   message?: string;
   onSelectField: (fieldId: string) => void;
   onRetry?: () => void;
 }) {
+  const positionedFields = fields.slice(0, 8).map((field, index) => {
+    const fallbackLeft = 10 + (index % 4) * 22;
+    const fallbackTop = 18 + Math.floor(index / 4) * 34;
+    const point = resolveMockMapPoint(field.centerLng, field.centerLat, fields, fallbackLeft, fallbackTop);
+    return { field, left: point.left, top: point.top };
+  });
+  const persistedDeviceMarkers = fields.flatMap((field) => field.deviceMarkers ?? []);
+  const allDeviceMarkers = [...persistedDeviceMarkers, ...draftDeviceMarkers];
+
   return (
     <div className="mockMapCanvas">
       <div className="mapGrid" />
@@ -876,14 +898,14 @@ function MockFieldMap({
           ) : null}
         </div>
       )}
-      {fields.slice(0, 8).map((field, index) => (
+      {positionedFields.map(({ field, left, top }) => (
         <button
           type="button"
           className={`mapPin ${field.irrigationState}`}
           key={field.id}
           style={{
-            left: `${10 + (index % 4) * 22}%`,
-            top: `${18 + Math.floor(index / 4) * 34}%`,
+            left: `${left}%`,
+            top: `${top}%`,
           }}
           onClick={() => onSelectField(field.id)}
         >
@@ -891,8 +913,76 @@ function MockFieldMap({
           <span>{field.name}</span>
         </button>
       ))}
+      {allDeviceMarkers.map((marker, index) => {
+        const device = devices.find((item) => item.id === marker.deviceId);
+        const markerMeta = resolveDeviceMarkerMeta(device);
+        const point = resolveMockMapPoint(
+          marker.lng,
+          marker.lat,
+          fields,
+          14 + (index % 5) * 16,
+          20 + Math.floor(index / 5) * 14,
+        );
+        return (
+          <button
+            type="button"
+            className={`mapDevicePin ${markerMeta.className}`}
+            key={`${marker.deviceId}-${marker.siteNumber ?? "draft"}-${index}`}
+            style={{
+              left: `${point.left}%`,
+              top: `${point.top}%`,
+            }}
+            onClick={() => {
+              window.location.hash = `#/devices/${marker.deviceId}`;
+            }}
+            title={resolveMapDeviceMarkerName(marker, devices)}
+          >
+            {shortMapDeviceIdentity(marker.deviceId)}
+            {marker.siteNumber ? `·${marker.siteNumber}` : ""}
+          </button>
+        );
+      })}
     </div>
   );
+}
+
+function resolveMockMapPoint(
+  lng: number | undefined,
+  lat: number | undefined,
+  fields: FieldSummary[],
+  fallbackLeft: number,
+  fallbackTop: number,
+) {
+  if (lng === undefined || lat === undefined) {
+    return { left: fallbackLeft, top: fallbackTop };
+  }
+  const points = fields.flatMap((field) => {
+    const entries: Array<[number, number]> = [];
+    if (Number.isFinite(field.centerLng) && Number.isFinite(field.centerLat)) {
+      entries.push([field.centerLng, field.centerLat]);
+    }
+    for (const marker of field.deviceMarkers ?? []) {
+      if (Number.isFinite(marker.lng) && Number.isFinite(marker.lat)) {
+        entries.push([marker.lng, marker.lat]);
+      }
+    }
+    return entries;
+  });
+  points.push([lng, lat]);
+  const lngs = points.map((item) => item[0]);
+  const lats = points.map((item) => item[1]);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const safeLngSpan = Math.max(0.0001, maxLng - minLng);
+  const safeLatSpan = Math.max(0.0001, maxLat - minLat);
+  const left = 8 + ((lng - minLng) / safeLngSpan) * 76;
+  const top = 14 + (1 - (lat - minLat) / safeLatSpan) * 66;
+  return {
+    left: Number(left.toFixed(2)),
+    top: Number(top.toFixed(2)),
+  };
 }
 
 function SelectedFieldPanel({
