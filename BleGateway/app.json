@@ -29,6 +29,9 @@
         "BLUETOOTH_CONNECT",
         "ACCESS_FINE_LOCATION",
         "ACCESS_NETWORK_STATE",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "POST_NOTIFICATIONS",
         "WAKE_LOCK"
       ],
       "adaptiveIcon": {

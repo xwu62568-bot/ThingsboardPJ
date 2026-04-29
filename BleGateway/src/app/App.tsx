@@ -13,6 +13,7 @@ import {
 import type { BleDevice, BleSession, BleState } from '../ble/BleTypes';
 import type { ThingsBoardAttributesPayload, ThingsBoardState } from '../thingsboard/ThingsBoardTypes';
 import { bleService, bleStore, protocol, thingsBoardBridge, thingsBoardStore } from './ble';
+import { startGatewayForegroundService, stopGatewayForegroundService } from './GatewayForeground';
 
 type KeyValueRow = {
   label: string;
@@ -33,6 +34,9 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribeBle = bleStore.subscribe(setState);
     const unsubscribeTb = thingsBoardStore.subscribe(setTbState);
+    startGatewayForegroundService().catch((error) => {
+      console.log('[APP] foreground service start failed', error);
+    });
     bleService.init().catch(() => undefined);
     protocol.start();
     thingsBoardBridge.start();
@@ -43,6 +47,7 @@ export default function App(): React.JSX.Element {
       thingsBoardBridge.stop();
       protocol.stop();
       bleService.destroy();
+      stopGatewayForegroundService().catch(() => undefined);
     };
   }, []);
 
